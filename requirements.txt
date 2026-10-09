@@ -1,0 +1,25 @@
+# 后端依赖（版本为本地实测通过的版本）
+fastapi==0.141.1
+uvicorn[standard]==0.54.0
+pydantic==2.13.5
+pymysql==1.2.3
+python-dotenv==1.2.3
+qdrant-client==1.19.1
+fastembed==0.8.1
+openai==3.19.2
+jieba==0.42.1
+# Agent：把 RAG 检索注册成工具，由大模型自主决定是否调用
+langchain==1.4.2
+langchain-core==1.6.5
+langchain-openai==1.6.6
+langgraph==1.2.12
+# PostgreSQL 结构化查询工具（与向量检索并行）
+psycopg2-binary==2.9.13
+# Neo4j 知识图谱查询工具（实体关系查询）
+neo4j==6.3.1
+# 图片解析：智谱视觉模型（官方 SDK 在 PyPI 上的包名是 zai-sdk，导入名才是 zai）
+zai-sdk==0.2.3
+# FastAPI 接收 multipart/form-data 上传所需（POST /analyze-image）
+python-multipart==0.0.32
+# 联网搜索工具（Tavily；不配 TAVILY_API_KEY 时工具不注册）
+tavily-python==0.8.4
