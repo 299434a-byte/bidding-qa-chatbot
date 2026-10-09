@@ -1,0 +1,1855 @@
+/*
+ * ============================================================================
+ * 全站设计变量（Design Tokens）
+ * ============================================================================
+ * 【为什么所有颜色都堆在这里】
+ *   全站组件只引用 var(--xxx)，不写死具体色值。改主题时只改这几十行，
+ *   所有页面（主对话页、/admin 后台页）会一起变，不用去几十个组件里逐处替换。
+ *
+ * 【为什么是「浅色 + 翡翠绿」】
+ *   · 浅色：招投标问答属于「长时间阅读文档」的场景，浅底深字比深色主题更省眼力，
+ *     也是 Linear / Notion / Vercel 这类一线 SaaS 的默认观感。
+ *   · 翡翠绿 #16a34a：招投标业务里「绿」代表中标 / 成交，语义贴切、商务感强；
+ *     相比蓝色也更不容易和「链接」「信息提示」混淆。
+ *
+ * 【三档文字色的层级】
+ *   --text（近黑）正文 → --text-dim（灰）次要说明 → --text-faint（浅灰）标签/提示，
+ *   颜色越浅代表信息越不重要，用户扫读时能自动分层。
+ *
+ * 【为什么技术内容区单独留深色变量】
+ *   代码块 / SQL / Cypher / 日志用 --code-* 深底浅字，是专业工具类产品的常见做法，
+ *   既保证代码可读性，又让外层容器保持浅色、不破坏整体轻盈感。
+ * ============================================================================
+ */
+:root {
+  /* ---------- 基础表面：浅色主题 ---------- */
+  --bg: #f7f8fa;              /* 页面主背景（浅灰白） */
+  --bg-soft: #fbfbfd;         /* 极浅灰，用于侧栏等次级区域 */
+  --panel: #ffffff;           /* 内容面板/卡片：纯白 */
+  --panel-hover: #f2f4f7;     /* 面板 hover 时的浅灰底 */
+
+  /* ---------- 边框分隔 ---------- */
+  --border: rgba(15, 23, 42, 0.08);
+  --border-strong: rgba(15, 23, 42, 0.12);
+
+  /* ---------- 文字三级 ---------- */
+  --text: #1a202e;            /* 主文字（近黑蓝灰） */
+  --text-dim: #5b6470;        /* 次级文字 */
+  --text-faint: #98a1b3;      /* 弱化文字 */
+
+  /* ---------- 品牌色：翡翠绿（招投标「中标/成交」语义） ---------- */
+  --accent: #16a34a;          /* 主按钮/品牌绿 */
+  --accent-strong: #15803d;   /* hover 加深 */
+  --accent-soft: #e8f7ee;     /* 浅绿底 */
+  --accent-on: #ffffff;       /* 绿底上的文字 */
+
+  /* ---------- 语义色：成功 ---------- */
+  --mint: #15803d;
+  --mint-soft: #e8f7ee;
+
+  /* ---------- 语义色：警告 ---------- */
+  --warn: #b45309;
+  --warn-soft: #fef6e6;
+
+  /* ---------- 语义色：错误 ---------- */
+  --danger: #b42318;
+  --danger-soft: #fdecee;
+
+  /* ---------- 中性信息色（工具调用等徽标） ---------- */
+  --info: #475569;
+  --info-soft: #eef2f7;
+
+  /* ---------- 技术内容区（保留深色底，专业产品常见做法） ---------- */
+  --code-bg: #0f172a;         /* 代码块/SQL/Cypher/日志深色底 */
+  --code-text: #cbd5e1;       /* 深色底上的浅色文字 */
+  --code-border: rgba(255, 255, 255, 0.08);
+
+  /* ---------- 阴影 ---------- */
+  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.04);
+  --shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 4px 12px rgba(15, 23, 42, 0.06);
+
+  /* ---------- 聚焦光晕（品牌绿） ---------- */
+  --ring: 0 0 0 3px rgba(22, 163, 74, 0.15);
+
+  /* ---------- 尺度 ---------- */
+  --radius: 12px;
+  --radius-sm: 8px;
+  --radius-lg: 12px;
+  --font: "PingFang SC", "Microsoft YaHei", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --mono: "JetBrains Mono", "Cascadia Code", Consolas, "Courier New", monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ------------------------------- 布局 ------------------------------- */
+.app {
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/*
+ * 主对话页左栏：260px 窄会话栏；上方可滚动，底部固定用户信息。
+ * 【为什么用 --bg-soft（极浅灰）而不是纯白】左栏是「导航区」、中间是「内容区」，
+ *   两者都纯白会糊成一片、分不清边界；左栏压一档灰 + 右侧 1px 边框，
+ *   就能形成「导航 vs 内容」的层次，又不会像深色侧栏那样压抑。
+ */
+.sidebar {
+  width: 260px;
+  flex: 0 0 260px;
+  border-right: 1px solid var(--border);
+  background: var(--bg-soft);
+  display: flex;
+  flex-direction: column;
+  padding: 14px 12px 12px;
+  overflow: hidden;
+}
+
+.rail-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.rail-user {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+  margin-top: 10px;
+}
+
+.main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* ------------------------------- 侧边栏 ------------------------------- */
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+
+.brand-logo {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  background: var(--accent);
+  display: grid;
+  place-items: center;
+  font-size: 17px;
+  color: var(--accent-on);
+  font-weight: 700;
+}
+
+.brand-title {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+
+.brand-sub {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.section {
+  margin-top: 20px;
+}
+
+.section-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  margin-bottom: 9px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 11px 12px;
+  box-shadow: var(--shadow-sm);
+}
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
+
+.stat {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 9px 10px;
+  box-shadow: var(--shadow-sm);
+}
+
+.stat-label {
+  font-size: 11px;
+  color: var(--text-faint);
+  margin-bottom: 2px;
+}
+
+.stat-value {
+  font-size: 18px;
+  font-weight: 650;
+  font-family: var(--mono);
+  letter-spacing: -0.4px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 0;
+  font-size: 12.5px;
+}
+
+.row + .row {
+  border-top: 1px dashed var(--border);
+}
+
+.row-key {
+  color: var(--text-dim);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.row-val {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+/*
+ * 徽标（badge）：状态/标签用的小胶囊。
+ * 【配色原则】统一是「浅色底 + 同色系深色字」，这是浅色主题下最稳的做法：
+ *   浅底保证不抢眼、不压过正文；深字保证足够对比度（浅底白字会看不清）。
+ *   四个语义色分别对应：蓝灰=中性信息、绿=成功、黄=警告、红=错误。
+ */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+/* 中性信息（例：工具调用、图片解析中）—— 用灰蓝而非蓝色，避免浅色页面上蓝色过于抢眼 */
+.badge-blue {
+  background: var(--info-soft);
+  color: var(--info);
+  border-color: rgba(15, 23, 42, 0.1);
+}
+
+/* 成功（例：已完成、已连接、已就绪） */
+.badge-mint {
+  background: var(--mint-soft);
+  color: var(--mint);
+  border-color: rgba(21, 128, 61, 0.22);
+}
+
+/* 警告（例：未配置、索引为空） */
+.badge-warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+  border-color: rgba(180, 83, 9, 0.22);
+}
+
+/* 错误（例：执行失败、请求异常） */
+.badge-danger {
+  background: var(--danger-soft);
+  color: var(--danger);
+  border-color: rgba(180, 35, 24, 0.22);
+}
+
+/* 无色彩倾向的普通标签（例：模型名）—— 灰底灰字，只做信息标注 */
+.badge-plain {
+  background: var(--panel-hover);
+  color: var(--text-dim);
+  border-color: var(--border);
+}
+
+button {
+  font-family: inherit;
+}
+
+/*
+ * 统一的「按压反馈」规则。
+ * 【为什么需要】鼠标点下去时如果页面毫无变化，人会下意识觉得「没点中」，从而重复点击。
+ *   让元素在按住时往下沉 1px，能模拟真实按钮被按下的物理感，是最低成本的「我收到你的点击了」信号。
+ * 【为什么用 translateY 而不是改 margin】translate 只触发合成层重绘，不影响周围元素布局，
+ *   所以按钮下沉时旁边的文字不会跟着抖动。
+ * 【为什么排除 :disabled】禁用态的按钮本来就不该有反馈，否则会误导用户以为可以点。
+ */
+.chip:active:not(:disabled),
+.seg-item:active:not(:disabled),
+.attach:active:not(:disabled),
+.chat-head-link:active,
+.admin-back:active {
+  transform: translateY(1px);
+}
+
+/*
+ * 键盘聚焦描边（无障碍）。
+ * 【为什么需要】只用鼠标的人看不到这个描边，但用 Tab 键操作的人必须能看见「焦点现在在哪个控件上」。
+ * 【为什么用 :focus-visible 而不是 :focus】:focus 连鼠标点击也会触发描边（很丑），
+ *   :focus-visible 只在键盘操作时出现，正好两全其美。
+ * 【为什么用品牌绿】让聚焦提示也带上品牌色，视觉更统一。
+ */
+:is(button, a, input, select, textarea):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/*
+ * 按钮体系分两档：
+ *   .btn        = 次要按钮（注销、清除、刷新…）：白底 + 1px 细边框 + 深灰字，hover 变浅灰底。
+ *   .btn-primary= 主按钮（新建对话、登录、重建知识库…）：翡翠绿实心底 + 白字，最醒目，
+ *                 一个界面里主按钮越少越好，用户才不会「选择困难」。
+ * 【为什么统一 height 为 36px】控件高度只有两档（36 / 40），同行并排时能自动对齐，
+ *   不会出现「按钮比输入框高 2px」这种肉眼可见的廉价感。
+ * 【为什么 transition 只列具体的属性】写 all 会把宽度、位置也一起动画化，
+ *   遇到列表增删时容易产生闪动；明确列出颜色/阴影/transform 更可控。
+ */
+.btn {
+  width: 100%;
+  height: 36px;
+  padding: 0 14px;
+  border-radius: 10px;
+  border: 1px solid var(--border-strong);
+  background: var(--panel);
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease,
+    box-shadow 0.15s ease, transform 0.15s ease;
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--panel-hover);
+}
+
+.btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* 主按钮：绿底白字 + 轻投影，让它在页面上「浮」起来，成为视线的第一落点 */
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-on);
+  font-weight: 600;
+  box-shadow: var(--shadow-sm);
+}
+
+/* 主按钮 hover 时加深一档（#16a34a → #15803d），给出明确的「可点」反馈 */
+.btn-primary:hover:not(:disabled) {
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+}
+
+.schema-table {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  margin-bottom: 8px;
+  overflow: hidden;
+}
+
+.schema-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 8px 10px;
+  background: var(--bg);
+  cursor: pointer;
+  font-size: 12.5px;
+}
+
+.schema-head:hover {
+  background: var(--panel-hover);
+}
+
+.schema-body {
+  padding: 4px 10px 9px;
+  border-top: 1px solid var(--border);
+}
+
+.col-row {
+  display: flex;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 12px;
+  align-items: baseline;
+}
+
+.col-name {
+  font-family: var(--mono);
+  color: var(--info);
+  min-width: 92px;
+  word-break: break-all;
+}
+
+.col-type {
+  color: var(--text-faint);
+  font-family: var(--mono);
+  font-size: 11px;
+  min-width: 66px;
+}
+
+.col-comment {
+  color: var(--text-dim);
+  flex: 1;
+  min-width: 0;
+}
+
+/* 建库日志面板：同样归入「技术内容区」，深底浅字 + 等宽字体，长时间盯日志也不累眼 */
+.log {
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--code-text);
+  background: var(--code-bg);
+  border: 1px solid var(--code-border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  max-height: 168px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* ------------------------------- 对话区 ------------------------------- */
+/* 顶部标题栏：白底 + 底部 1px 分隔线。浅色主题下用「白底 + 细线」界定区域，比深色玻璃拟态更干净 */
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 22px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.topbar-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.topbar-status {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* 极简标题栏：logo + 标题 + 当前模式标签 + 控制台入口 */
+.chat-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.chat-head-logo {
+  width: 28px;
+  height: 28px;
+  border-radius: 9px;
+  background: var(--accent);
+  display: grid;
+  place-items: center;
+  font-size: 15px;
+  color: var(--accent-on);
+  flex: 0 0 28px;
+}
+
+.chat-head-link {
+  padding: 4px 11px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text-dim);
+  font-size: 12px;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+}
+
+.chat-head-link:hover {
+  color: var(--accent-strong);
+  border-color: rgba(22, 163, 74, 0.4);
+  background: var(--accent-soft);
+}
+
+.messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px 22px 12px;
+}
+
+.msg {
+  max-width: 900px;
+  margin: 0 auto 16px;
+  display: flex;
+  gap: 12px;
+}
+
+.msg-avatar {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  border-radius: 9px;
+  display: grid;
+  place-items: center;
+  font-size: 14px;
+  margin-top: 2px;
+}
+
+.msg-user .msg-avatar {
+  background: var(--accent);
+  color: var(--accent-on);
+  border: 1px solid var(--accent);
+}
+
+.msg-assistant .msg-avatar {
+  background: var(--info-soft);
+  color: var(--info);
+  border: 1px solid var(--border);
+  font-weight: 700;
+}
+
+.msg-body {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 用户消息靠右、助手消息靠左：用户侧用 row-reverse 把头像挪到右边，气泡贴着右侧 */
+.msg-user {
+  flex-direction: row-reverse;
+}
+
+/*
+ * 用户气泡：浅绿底（--accent-soft）+ 深色字。
+ * 【为什么不直接绿底白字】用户提问经常很长，浅绿底深字阅读更轻松，也更像 Linear/Notion 的克制感；
+ *   同时只有用户气泡带绿，助手气泡保持白底，一眼就能区分「我说的 / AI 说的」。
+ */
+.msg-user .msg-body {
+  flex: 0 1 auto;
+  max-width: 76%;
+  background: var(--accent-soft);
+  border: 1px solid rgba(22, 163, 74, 0.22);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/*
+ * 助手气泡：白底 + 1px 细边框 + 极轻阴影。
+ * 【为什么要加阴影】白底气泡放在浅灰页面上如果只有边框会显得「贴」在背景上；
+ *   一层很淡的投影能让它微微浮起，层次感立刻出来（阴影一定不能重，重了就变「塑料感」）。
+ * 【max-width 92%】助手回答含表格/代码，留出更多宽度；用户消息 76% 则是为了保持长短对比的节奏感。
+ */
+.msg-assistant .msg-body {
+  flex: 0 1 auto;
+  max-width: 92%;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 15px;
+  box-shadow: var(--shadow-sm);
+}
+
+.answer :is(p, ul, ol, blockquote, pre, h1, h2, h3, h4) {
+  margin: 0 0 9px;
+}
+
+.answer > :last-child {
+  margin-bottom: 0;
+}
+
+.answer h1,
+.answer h2,
+.answer h3,
+.answer h4 {
+  font-size: 14.5px;
+  font-weight: 650;
+  margin-top: 14px;
+}
+
+.answer ul,
+.answer ol {
+  padding-left: 20px;
+}
+
+.answer li {
+  margin-bottom: 3px;
+}
+
+.answer blockquote {
+  border-left: 3px solid var(--accent);
+  padding: 3px 0 3px 11px;
+  color: var(--text-dim);
+  background: var(--accent-soft);
+  border-radius: 0 6px 6px 0;
+}
+
+.answer code.inline {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  padding: 1px 5px;
+  border-radius: 5px;
+}
+
+.answer pre.code {
+  background: var(--code-bg);
+  border: 1px solid var(--code-border);
+  border-radius: 9px;
+  padding: 11px 13px;
+  overflow-x: auto;
+}
+
+.answer pre.code code {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--code-text);
+}
+
+.answer a {
+  color: var(--accent-strong);
+}
+
+.cursor {
+  display: inline-block;
+  width: 7px;
+  height: 15px;
+  background: var(--mint);
+  vertical-align: -2px;
+  animation: blink 1s steps(2) infinite;
+  border-radius: 1px;
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+/* ------------------------------- 参考来源 ------------------------------- */
+.sources {
+  margin-top: 14px;
+  border-top: 1px dashed var(--border);
+  padding-top: 11px;
+}
+
+.sources-title {
+  font-size: 11px;
+  letter-spacing: 1px;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.source {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  margin-bottom: 8px;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.source-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 11px;
+  cursor: pointer;
+  flex-wrap: wrap;
+}
+
+.source-head:hover {
+  background: var(--panel-hover);
+}
+
+.source-idx {
+  width: 19px;
+  height: 19px;
+  border-radius: 6px;
+  background: var(--info-soft);
+  color: var(--info);
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  font-weight: 700;
+  flex: 0 0 19px;
+}
+
+.source-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 340px;
+}
+
+.source-spacer {
+  flex: 1;
+}
+
+.source-metrics {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.source-body {
+  padding: 9px 11px 11px;
+  border-top: 1px solid var(--border);
+}
+
+.source-snippet {
+  font-size: 12.5px;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--bg);
+  border-radius: 8px;
+  padding: 9px 11px;
+  max-height: 190px;
+  overflow-y: auto;
+}
+
+.fields {
+  margin-top: 9px;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 2px;
+}
+
+.field-row {
+  display: flex;
+  gap: 9px;
+  font-size: 12px;
+  padding: 3px 0;
+  border-bottom: 1px dashed var(--border);
+}
+
+.field-key {
+  color: var(--text-faint);
+  min-width: 108px;
+  font-family: var(--mono);
+  word-break: break-all;
+}
+
+.field-val {
+  color: var(--text);
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
+}
+
+/* ------------------------------- 输入区 ------------------------------- */
+/* 底部输入区：白底 + 顶部 1px 分隔线，与聊天区同色，视线自然认为它们属于同一个「内容面板」 */
+.composer {
+  border-top: 1px solid var(--border);
+  padding: 14px 22px 18px;
+  background: var(--panel);
+}
+
+.composer-inner {
+  max-width: 900px;
+  margin: 0 auto;
+}
+
+.chips {
+  display: flex;
+  gap: 7px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.chip {
+  padding: 4px 11px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text-dim);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.chip:hover:not(:disabled) {
+  color: var(--accent-strong);
+  border-color: rgba(22, 163, 74, 0.4);
+  background: var(--accent-soft);
+}
+
+.chip:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.input-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+}
+
+textarea {
+  flex: 1;
+  resize: none;
+  min-height: 46px;
+  max-height: 150px;
+  padding: 12px 14px;
+  border-radius: 11px;
+  border: 1px solid var(--border-strong);
+  background: var(--panel);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13.5px;
+  line-height: 1.5;
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+textarea:focus {
+  border-color: var(--accent);
+  box-shadow: var(--ring);
+}
+
+.send {
+  height: 46px;
+  padding: 0 22px;
+  border-radius: 11px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--accent-on);
+  font-size: 13.5px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  box-shadow: var(--shadow-sm);
+  transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease,
+    transform 0.15s ease;
+}
+
+.send:hover:not(:disabled) {
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+}
+
+.send:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.send:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.hint {
+  margin-top: 8px;
+  font-size: 11.5px;
+  color: var(--text-faint);
+  text-align: center;
+}
+
+/* ------------------------------- 图片上传与识别 ------------------------------- */
+.attach {
+  height: 46px;
+  width: 46px;
+  flex: 0 0 46px;
+  border-radius: 11px;
+  border: 1px solid var(--border-strong);
+  background: var(--panel);
+  color: var(--text-dim);
+  font-size: 17px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.attach:hover:not(:disabled) {
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  border-color: rgba(22, 163, 74, 0.4);
+}
+
+.attach:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.attach-preview {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--bg);
+}
+
+.attach-preview img {
+  width: 54px;
+  height: 54px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.attach-preview-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.msg-image {
+  display: block;
+  max-width: 320px;
+  max-height: 240px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  margin-bottom: 8px;
+}
+
+.vision-card {
+  border: 1px solid rgba(21, 128, 61, 0.28);
+  background: var(--mint-soft);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  margin-bottom: 10px;
+}
+
+.vision-card-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.vision-card-body {
+  font-size: 12.5px;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.spinner {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  border: 2px solid rgba(15, 23, 42, 0.15);
+  border-top-color: currentColor;
+  display: inline-block;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ------------------------------- 联网搜索 ------------------------------- */
+.chip-toggle {
+  border-style: dashed;
+}
+
+.chip-on {
+  border-style: solid;
+  border-color: rgba(22, 163, 74, 0.45);
+  background: var(--mint-soft);
+  color: var(--mint);
+}
+
+.web-item {
+  padding: 9px 0;
+  border-top: 1px solid var(--border);
+}
+
+.web-item:first-of-type {
+  border-top: none;
+  padding-top: 10px;
+}
+
+.web-item-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.web-item-title {
+  flex: 1;
+  min-width: 180px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent-strong);
+  text-decoration: none;
+  word-break: break-word;
+}
+
+.web-item-title:hover {
+  text-decoration: underline;
+}
+
+.web-item-score {
+  margin-top: 6px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--info-soft);
+  overflow: hidden;
+}
+
+.web-item-score span {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent);
+}
+
+.web-item-url {
+  margin-top: 5px;
+  font-size: 11.5px;
+  color: var(--text-faint);
+  word-break: break-all;
+}
+
+.web-item-snippet {
+  margin-top: 5px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  line-height: 1.65;
+}
+
+/* ---------------- 工具痕迹折叠块（PostgreSQL SQL / Neo4j Cypher / 联网搜索） ----------------
+ * 【深色嵌套原则】整站是浅色主题，但「技术内容区」刻意保留深色底：
+ *   外层 .trace-item 仍然是浅色（与卡片一致，视觉上属于页面的一部分），
+ *   只有真正放代码/结果表/日志的那一小块 .trace-code / .trace-scroll / .log 用 --code-bg 深底 + 浅色字。
+ *   这样既有「代码该有的专业感」，又不会让整块界面显得又黑又重。
+ */
+.trace-item {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  margin-bottom: 8px;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.trace-summary {
+  padding: 7px 10px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-dim);
+  list-style: none;
+  user-select: none;
+}
+
+.trace-summary::-webkit-details-marker {
+  display: none;
+}
+
+.trace-summary:hover {
+  background: var(--panel-hover);
+  color: var(--text);
+}
+
+.trace-code {
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--code-bg);
+  border-top: 1px solid var(--code-border);
+  border-bottom: 1px solid var(--code-border);
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--code-text);
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* SQL / Cypher 的结果表格同样铺在深底上，和上面的代码块连成一体，形成一个完整的技术面板 */
+.trace-scroll {
+  overflow-x: auto;
+  padding: 8px 10px 4px;
+  background: var(--code-bg);
+}
+
+.trace-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12px;
+}
+
+.trace-table th,
+.trace-table td {
+  border: 1px solid var(--code-border);
+  padding: 4px 8px;
+  text-align: left;
+  white-space: nowrap;
+  color: var(--code-text);
+}
+
+.trace-table th {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--code-text);
+  font-weight: 600;
+}
+
+.trace-note {
+  font-size: 12px;
+  color: var(--text-faint);
+  padding: 6px 10px;
+}
+
+.empty {
+  max-width: 640px;
+  margin: 60px auto 0;
+  text-align: center;
+  color: var(--text-dim);
+}
+
+.empty-logo {
+  width: 56px;
+  height: 56px;
+  margin: 0 auto 16px;
+  border-radius: 16px;
+  background: var(--accent);
+  display: grid;
+  place-items: center;
+  font-size: 26px;
+  color: var(--accent-on);
+}
+
+.empty h2 {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text);
+  margin: 0 0 8px;
+}
+
+.empty p {
+  margin: 0 auto 6px;
+  font-size: 14px;
+  max-width: 520px;
+}
+
+/* 空状态里的示例问题：居中换行排列，点击直接提问 */
+.empty-samples {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  margin: 20px auto 0;
+  max-width: 560px;
+}
+
+/*
+ * 示例问题做成「浅灰底圆角标签」。
+ * 【为什么这里要覆盖 .chip 的底色】输入区里的 .chip 是白底（在白色 composer 上），
+ *   而空状态背景本身就是浅灰，若还用白底会变成「白块贴灰底」，很突兀；
+ *   所以这里改成和背景同色系的浅灰，hover 变浅绿的效果则直接复用 .chip:hover 的规则。
+ * 【为什么统一 height 32px】标签高度固定后，换行的多行标签能自动对齐成整齐的网格。
+ */
+.empty-samples .chip {
+  background: var(--bg);
+  height: 32px;
+  padding: 0 14px;
+  display: inline-flex;
+  align-items: center;
+}
+
+.notice {
+  border-radius: 9px;
+  padding: 9px 12px;
+  font-size: 12.5px;
+  margin-bottom: 10px;
+  border: 1px solid transparent;
+}
+
+.notice-warn {
+  background: var(--warn-soft);
+  border-color: rgba(180, 83, 9, 0.25);
+  color: var(--warn);
+}
+
+.notice-danger {
+  background: var(--danger-soft);
+  border-color: rgba(180, 35, 24, 0.25);
+  color: var(--danger);
+}
+
+/*
+ * 细滚动条：8px 宽、圆角、低对比灰色。
+ * 【为什么不用系统默认】Windows 默认滚动条又宽又灰，在浅色精致的卡片里非常突兀；
+ *   收窄到 8px + 半透明灰，平时几乎看不见，鼠标移上去（hover）才加深一档提示「可以拖」。
+ *   track 用透明，滚动条就不会拖出一条多余的灰槽。
+ */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(15, 23, 42, 0.18);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(15, 23, 42, 0.32);
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ------------------------------- 模式选择器 ------------------------------- */
+/*
+ * 模式切换（ReAct / Plan-and-Solve / 深度思考）。
+ * 【未选中】灰字 + 透明底，弱化处理，不跟正文抢注意力；
+ * 【选中】浅绿底 + 深绿字（.seg-active），用品牌色把「当前模式」点亮，
+ *   比「灰底 + 白字」更柔和，也符合浅色主题整体克制的调性。
+ * 整条用 overflow:hidden 裁成胶囊形，所以第一个/最后一个按钮的圆角会自动贴合外框。
+ */
+.seg {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.seg-item {
+  padding: 4px 12px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.seg-item + .seg-item {
+  border-left: 1px solid var(--border);
+}
+
+.seg-item:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--panel-hover);
+}
+
+.seg-item:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.seg-active {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-weight: 600;
+}
+
+/* ------------------------------- 规划 / 步骤 / 自评 ------------------------------- */
+.plan-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  padding: 10px 12px;
+  margin-bottom: 10px;
+}
+
+.plan-card-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.plan-list {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.plan-item {
+  font-size: 12.5px;
+  margin-bottom: 5px;
+}
+
+.plan-item-title {
+  font-weight: 600;
+}
+
+.plan-item-detail {
+  display: block;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.step-item {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 10px;
+  margin-bottom: 7px;
+  background: var(--bg);
+}
+
+.step-item summary {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.step-title {
+  min-width: 0;
+  word-break: break-word;
+}
+
+.step-observation {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--panel);
+  border-radius: 8px;
+  padding: 8px 10px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.reflect-card {
+  border: 1px solid rgba(180, 83, 9, 0.28);
+  background: var(--warn-soft);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  margin-bottom: 10px;
+}
+
+.reflect-item {
+  font-size: 12.5px;
+}
+
+.reflect-item + .reflect-item {
+  margin-top: 8px;
+  border-top: 1px dashed rgba(180, 83, 9, 0.2);
+  padding-top: 8px;
+}
+
+.reflect-round {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-left: 6px;
+}
+
+.reflect-issues {
+  margin: 6px 0 0;
+  padding-left: 20px;
+  color: var(--text-dim);
+}
+
+/* ------------------------------- 修订稿 ------------------------------- */
+.revision-card {
+  margin-top: 12px;
+  border: 1px solid rgba(180, 83, 9, 0.28);
+  border-radius: var(--radius);
+  background: var(--warn-soft);
+  padding: 10px 12px;
+}
+
+.revision-summary {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.revision-toggle {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+  margin-top: 10px;
+  background: var(--bg);
+}
+
+.revision-hint {
+  margin-top: 8px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+/* ------------------------------- 对话历史 ------------------------------- */
+.history-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.history-hint {
+  font-size: 12px;
+  color: var(--text-faint);
+  line-height: 1.6;
+}
+
+.history-toolbar {
+  display: flex;
+  gap: 6px;
+}
+
+.history-search {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.history-input,
+.history-select {
+  width: 100%;
+  padding: 7px 9px;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  background: var(--panel);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12.5px;
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.history-input:focus,
+.history-select:focus {
+  border-color: var(--accent);
+  box-shadow: var(--ring);
+}
+
+.history-select {
+  cursor: pointer;
+}
+
+.history-range {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.history-range-sep {
+  font-size: 11px;
+  color: var(--text-faint);
+  flex: 0 0 auto;
+}
+
+.history-search-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.history-search-actions .btn {
+  width: auto;
+  flex: 1;
+}
+
+.history-results {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 9px;
+  background: var(--bg);
+}
+
+.history-results-title,
+.history-list-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  letter-spacing: 0.6px;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+
+.history-list-title {
+  margin-top: 4px;
+  margin-bottom: 0;
+}
+
+.history-hit {
+  padding: 7px 0;
+  border-top: 1px dashed var(--border);
+  cursor: pointer;
+}
+
+.history-hit:first-of-type {
+  border-top: none;
+}
+
+.history-hit:hover .history-hit-title {
+  color: var(--accent-strong);
+}
+
+.history-hit-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.history-hit-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 150px;
+}
+
+.history-hit-time {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--text-faint);
+  margin-left: auto;
+}
+
+.history-snippet {
+  margin-top: 5px;
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.6;
+  word-break: break-word;
+  max-height: 96px;
+  overflow: hidden;
+}
+
+.history-snippet em {
+  font-style: normal;
+  background: var(--warn-soft);
+  color: var(--warn);
+  border-radius: 3px;
+  padding: 0 2px;
+}
+
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.history-item {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 7px 9px;
+  background: var(--bg);
+}
+
+.history-item-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.history-item-head:hover .history-title {
+  color: var(--accent-strong);
+}
+
+.history-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-meta {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.history-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.history-rename {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.history-rename .history-input {
+  flex: 1;
+}
+
+/* ------------------------------- 登录 / 注册 ------------------------------- */
+.auth-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.45);
+  backdrop-filter: blur(4px);
+  display: grid;
+  place-items: center;
+  z-index: 50;
+}
+
+.auth-card {
+  width: 350px;
+  max-width: calc(100vw - 32px);
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  padding: 18px;
+  box-shadow: var(--shadow);
+}
+
+.auth-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.auth-title {
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.auth-close {
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 14px;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+
+.auth-close:hover {
+  color: var(--text);
+}
+
+.auth-tabs {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+  margin-bottom: 14px;
+}
+
+.auth-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-bottom: 10px;
+}
+
+.auth-field label {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.auth-field input {
+  padding: 9px 11px;
+  border-radius: 9px;
+  border: 1px solid var(--border-strong);
+  background: var(--panel);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.auth-field input:focus {
+  border-color: var(--accent);
+  box-shadow: var(--ring);
+}
+
+.auth-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.auth-actions .btn {
+  flex: 1;
+}
+
+.auth-hint {
+  margin-top: 12px;
+  font-size: 11.5px;
+  color: var(--text-faint);
+  line-height: 1.6;
+}
+
+/* ------------------------------- 检索定位高亮 ------------------------------- */
+.msg-highlight .msg-body {
+  animation: msgGlow 2.6s ease-out;
+  box-shadow: 0 0 0 2px rgba(22, 163, 74, 0.6);
+}
+
+@keyframes msgGlow {
+  0% {
+    box-shadow: 0 0 0 0 rgba(22, 163, 74, 0);
+    background: var(--accent-soft);
+  }
+  15% {
+    box-shadow: 0 0 0 3px rgba(22, 163, 74, 0.7);
+    background: var(--accent-soft);
+  }
+  100% {
+    box-shadow: 0 0 0 2px rgba(22, 163, 74, 0.5);
+  }
+}
+
+/* ------------------------------- 后台页 /admin ------------------------------- */
+.admin {
+  min-height: 100vh;
+  padding: 20px 26px 48px;
+}
+
+.admin-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.admin-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.admin-back {
+  padding: 5px 13px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text-dim);
+  font-size: 12.5px;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+}
+
+.admin-back:hover {
+  color: var(--accent-strong);
+  border-color: rgba(22, 163, 74, 0.4);
+  background: var(--accent-soft);
+}
+
+.admin-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+
+/*
+ * 后台页卡片：白底 + 1px 细边框 + 极轻阴影。
+ * 【为什么 hover 时阴影加深】后台页卡片很多，鼠标划过时轻微「浮起」一下，
+ *   能帮用户确认「我正指向哪一张」，属于低成本的可用性细节。
+ */
+.admin-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  box-shadow: var(--shadow-sm);
+  transition: box-shadow 0.15s ease, border-color 0.15s ease;
+}
+
+.admin-card:hover {
+  box-shadow: var(--shadow);
+}
+
+.admin-card-title {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.admin-span-all {
+  grid-column: 1 / -1;
+}
+
+.admin-status-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+}
