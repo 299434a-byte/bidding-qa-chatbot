@@ -78,6 +78,7 @@ export default function HistoryPanel({ enabled, user, onOpenConversation, onNewC
 
   // 登录态 / 外部 refreshKey 变化时重新拉取
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- 由登录态变化触发的重拉，setState 全在 async 回调里，非渲染期同步更新
     void load();
   }, [load, refreshKey]);
 

@@ -12,6 +12,7 @@ export default function ThemeToggle() {
   const [pref, setPref] = useState<ThemePref>("auto");
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- SSR 水合前不能读 localStorage，主题偏好初始化必须放在 effect 里
     setPref(getThemePref());
   }, []);
 

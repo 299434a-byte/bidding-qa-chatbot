@@ -129,6 +129,7 @@ export default function EvidencePanel({ sources, query, size, onSizeChange, onCl
     if (!locate) return;
     const el = listRef.current?.querySelector<HTMLElement>(`[data-ev-index="${locate.index}"]`);
     el?.scrollIntoView({ behavior: "smooth", block: "center" });
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- 定位到来时的瞬时高亮，随 locate 变化重置、1.7s 后自动清除，属于对 props 变化的响应
     setFlashIndex(locate.index);
     const timer = window.setTimeout(() => setFlashIndex(null), 1700);
     return () => window.clearTimeout(timer);

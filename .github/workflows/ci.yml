@@ -38,6 +38,9 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - name: Install dependencies
         run: npm ci
+      - name: Lint
+        # eslint + eslint-config-next（Next 16 起 next lint 子命令已移除，规则集相同）。
+        run: npm run lint
       - name: Type check
         # 只跑 tsc、不跑 next build：构建要数倍时间且需要完整 Next 环境（含页面数据依赖），
         # 而本项目前端的绝大多数回归（props 不匹配、类型漂移）类型检查就能拦住。
