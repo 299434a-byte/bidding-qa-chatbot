@@ -1,14 +1,25 @@
 "use client";
 
+import Icon, { type IconName } from "@/components/ui/icons";
 import type { Health, KbStats, SchemaResponse } from "@/lib/api";
 
 /**
- * 系统状态卡片区：把原来主对话页顶部那排「知识库 N 块 / PostgreSQL 已连接 / 图谱 / 检索策略」大徽标
- * 搬到这里，用整齐的小卡片展示。
+ * 系统状态卡片区：按「模型 / 数据 / 工具」三组展示。
  *
- * 【为什么单独抽成组件】
- *   纯展示，数据全部来自 props（health / kb / schema），没有自己的状态，方便复用与阅读。
+ * 每张卡统一为「图标 + 名称 + 值 + 一句话说明 + 语义色状态点」：
+ *   灰点 = 未启用，绿点 = 正常，红点 = 异常。
+ * 缺失的值一律显示 `—`，避免出现「0 块 —」这类残缺拼接。
  */
+
+type Tone = "ok" | "err" | "off";
+
+type StatCard = {
+  name: string;
+  icon: IconName;
+  value: string;
+  desc: string;
+  tone: Tone;
+};
 
 type Props = {
   health: Health | null;
@@ -16,76 +27,136 @@ type Props = {
   schema: SchemaResponse | null;
 };
 
-/** 单张状态卡：标题 + 值 + 一个表示状态的小徽标 */
-function StatusCard({ label, value, tone, badge }: { label: string; value: string; tone: string; badge: string }) {
-  return (
-    <div className="stat">
-      <div className="stat-label">{label}</div>
-      <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4, flexWrap: "wrap" }}>
-        <span className={`badge ${tone}`}>{badge}</span>
-        <span style={{ fontSize: 12, color: "var(--text-dim)" }}>{value}</span>
-      </div>
-    </div>
-  );
+/** 空值统一成 `—` */
+function dash(value: unknown): string {
+  if (value === null || value === undefined) return "—";
+  const text = String(value).trim();
+  return text === "" ? "—" : text;
+}
+
+/** 千分位 + 单位 */
+function fmtCount(value: number | undefined, unit: string): string {
+  if (value === undefined || value === null) return "—";
+  return `${value.toLocaleString("zh-CN")} ${unit}`;
 }
 
 export default function StatusCards({ health, kb, schema }: Props) {
-  const cards = [
+  const points = kb?.points ?? 0;
+  const dim = kb?.vector_dim ?? 0;
+  const pgSource = health?.kb_source === "postgres";
+  const mysqlOk = Boolean(schema?.connected);
+
+  const groups: { title: string; icon: IconName; cards: StatCard[] }[] = [
     {
-      label: "运行模式",
-      badge: health?.agent_configured ? "Agent 模式" : "仅检索模式",
-      tone: health?.agent_configured ? "badge-mint" : "badge-warn",
-      value: health?.llm_configured ? health.llm_model_display || health.llm_model || "" : "未配置大模型",
+      title: "模型",
+      icon: "cpu",
+      cards: [
+        {
+          name: "对话模型",
+          icon: "message",
+          value: health?.llm_configured ? dash(health.llm_model_display || health.llm_model) : "未配置",
+          desc: "理解问题、调度工具并生成回答",
+          tone: health?.llm_configured ? "ok" : "off",
+        },
+        {
+          name: "重排模型",
+          icon: "regenerate",
+          value: health?.rerank_configured ? dash(health.rerank_model) : "未配置",
+          desc: "对初步召回的来源重新排序",
+          tone: health?.rerank_configured ? "ok" : "off",
+        },
+        {
+          name: "向量模型",
+          icon: "database",
+          value: dim > 0 ? `${dash(kb?.embed_model ?? "内置模型")}` : "未建库",
+          desc: dim > 0 ? `文本转成 ${dim} 维向量用于语义检索` : "建库后展示向量维度",
+          tone: dim > 0 ? "ok" : "off",
+        },
+      ],
     },
     {
-      label: "知识库",
-      badge: `${kb?.points ?? 0} 块`,
-      tone: (kb?.points ?? 0) === 0 ? "badge-warn" : "badge-blue",
-      value: kb?.collection ?? "—",
+      title: "数据",
+      icon: "database",
+      cards: [
+        {
+          name: "知识库",
+          icon: "database",
+          value: fmtCount(kb?.points, "块"),
+          desc: `关键词索引 ${fmtCount(kb?.bm25_docs, "篇")}`,
+          tone: points > 0 ? "ok" : "off",
+        },
+        {
+          name: "数据源",
+          icon: "database",
+          value: pgSource ? "PostgreSQL 副本" : mysqlOk ? "MySQL" : dash(schema?.database),
+          desc: "建库管道从这里读取业务数据",
+          tone: pgSource || mysqlOk ? "ok" : health?.mysql_configured ? "err" : "off",
+        },
+        {
+          name: "检索策略",
+          icon: "search",
+          value: health?.rerank_configured ? "混合检索 + 重排" : "混合检索",
+          desc: "向量与关键词两路召回后融合排序",
+          tone: points > 0 ? "ok" : "off",
+        },
+      ],
     },
     {
-      label: "MySQL 数据源",
-      badge: schema?.connected ? "已连接" : health?.mysql_configured ? "连接失败" : "未配置",
-      tone: schema?.connected ? "badge-mint" : health?.mysql_configured ? "badge-danger" : "badge-warn",
-      value: schema?.database ?? "—",
-    },
-    {
-      label: "PostgreSQL",
-      badge: health?.pg_configured ? "已连接" : "未配置",
-      tone: health?.pg_configured ? "badge-mint" : "badge-plain",
-      value: "结构化统计查询",
-    },
-    {
-      label: "知识图谱",
-      badge: health?.graph_configured ? "已连接" : "未配置",
-      tone: health?.graph_configured ? "badge-mint" : "badge-plain",
-      value: "Neo4j 关系查询",
-    },
-    {
-      label: "联网搜索",
-      badge: health?.web_search_configured ? "已就绪" : "未配置",
-      tone: health?.web_search_configured ? "badge-mint" : "badge-plain",
-      value: "Tavily 最新公告",
-    },
-    {
-      label: "检索策略",
-      badge: `向量 + BM25 + RRF${health?.rerank_configured ? " + 重排" : ""}`,
-      tone: "badge-plain",
-      value: health?.rerank_configured ? "已启用重排" : "未启用重排",
-    },
-    {
-      label: "向量模型",
-      badge: kb?.embed_model ?? `${kb?.vector_dim ?? 512}d`,
-      tone: "badge-plain",
-      value: `${kb?.bm25_docs ?? 0} 篇 BM25 文档`,
+      title: "工具",
+      icon: "network",
+      cards: [
+        {
+          name: "结构化统计",
+          icon: "chart",
+          value: health?.pg_configured ? "可用" : "未配置",
+          desc: "预算、数量类问题的精确 SQL 统计",
+          tone: health?.pg_configured ? "ok" : "off",
+        },
+        {
+          name: "关系查询",
+          icon: "network",
+          value: health?.graph_configured ? "可用" : "未配置",
+          desc: "公司、项目之间的关系类问题",
+          tone: health?.graph_configured ? "ok" : "off",
+        },
+        {
+          name: "联网搜索",
+          icon: "external",
+          value: health?.web_search_configured ? "可用" : "未配置",
+          desc: "本地知识库查不到时补充最新公告",
+          tone: health?.web_search_configured ? "ok" : "off",
+        },
+      ],
     },
   ];
 
   return (
-    <div className="admin-status-grid">
-      {cards.map((card) => (
-        <StatusCard key={card.label} {...card} />
+    <>
+      {groups.map((group) => (
+        <div key={group.title}>
+          <div className="stat-group-title">
+            <Icon name={group.icon} size={14} />
+            {group.title}
+          </div>
+          <div className="stat-grid">
+            {group.cards.map((card) => (
+              <div className="stat-card" key={card.name}>
+                <div className="stat-top">
+                  <span className={`stat-icon ${card.tone === "off" ? "is-off" : card.tone === "err" ? "is-err" : ""}`}>
+                    <Icon name={card.icon} size={14} />
+                  </span>
+                  <span className="stat-name">{card.name}</span>
+                  <span className="stat-dot-holder" title={card.tone === "ok" ? "正常" : card.tone === "err" ? "异常" : "未启用"}>
+                    <span className={`dot ${card.tone === "ok" ? "dot-ok" : card.tone === "err" ? "dot-err" : "dot-off"}`} />
+                  </span>
+                </div>
+                <div className="stat-value">{card.value}</div>
+                <div className="stat-desc">{card.desc}</div>
+              </div>
+            ))}
+          </div>
+        </div>
       ))}
-    </div>
+    </>
   );
 }

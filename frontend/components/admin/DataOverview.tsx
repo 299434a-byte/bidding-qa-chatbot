@@ -1,13 +1,11 @@
 "use client";
 
+import Icon from "@/components/ui/icons";
 import type { KbStats, SchemaResponse } from "@/lib/api";
 
 /**
- * 数据概览：向量库里的文档块分布（按来源表）+ MySQL 各表的实际行数。
- *
- * 【为什么单独抽成组件】
- *   纯展示，数据来自 props（kb / schema），把「有多少数据」一眼看清，
- *   与「运行状态」（StatusCards）分开放，页面更清晰。
+ * 数据概览：知识库的文档块分布（按来源）与业务数据表的实际行数。
+ * 纯展示，数据来自 props（kb / schema）；数字统一千分位 + 单位。
  */
 
 type Props = {
@@ -15,51 +13,71 @@ type Props = {
   schema: SchemaResponse | null;
 };
 
+/** 千分位 + 单位；空值显示 `—` */
+function fmt(value: number | undefined, unit: string): string {
+  if (value === undefined || value === null) return "—";
+  return `${value.toLocaleString("zh-CN")} ${unit}`;
+}
+
 export default function DataOverview({ kb, schema }: Props) {
   const tables = schema?.tables ? Object.values(schema.tables) : [];
+  const byTable = Object.entries(kb?.by_table ?? {});
 
   return (
     <div className="admin-card admin-span-all">
       <div className="admin-card-title">
         数据概览
-        <span className="badge badge-plain">向量库 {kb?.points ?? 0} 块</span>
+        <span className="badge badge-plain">向量库 {fmt(kb?.points, "块")}</span>
       </div>
 
-      <div className="stat-grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))" }}>
-        <div className="stat">
-          <div className="stat-label">向量库文档块</div>
-          <div className="stat-value">{kb?.points ?? 0}</div>
+      <div className="stat-grid">
+        <div className="stat-card">
+          <div className="stat-top">
+            <span className="stat-icon">
+              <Icon name="database" size={14} />
+            </span>
+            <span className="stat-name">文档块</span>
+          </div>
+          <div className="stat-value">{fmt(kb?.points, "块")}</div>
+          <div className="stat-desc">可供检索的原文片段总数</div>
         </div>
-        <div className="stat">
-          <div className="stat-label">BM25 文档数</div>
-          <div className="stat-value">{kb?.bm25_docs ?? 0}</div>
+
+        <div className="stat-card">
+          <div className="stat-top">
+            <span className="stat-icon">
+              <Icon name="search" size={14} />
+            </span>
+            <span className="stat-name">关键词索引</span>
+          </div>
+          <div className="stat-value">{fmt(kb?.bm25_docs, "篇")}</div>
+          <div className="stat-desc">参与关键词检索的文档数</div>
         </div>
-        {Object.entries(kb?.by_table ?? {}).map(([table, count]) => (
-          <div className="stat" key={table}>
-            <div className="stat-label">{kb?.table_labels?.[table] ?? table} · 块</div>
-            <div className="stat-value">{count}</div>
+
+        {byTable.map(([table, count]) => (
+          <div className="stat-card" key={table}>
+            <div className="stat-top">
+              <span className="stat-icon">
+                <Icon name="file-text" size={14} />
+              </span>
+              <span className="stat-name">{kb?.table_labels?.[table] ?? "业务数据"}</span>
+            </div>
+            <div className="stat-value">{fmt(count, "块")}</div>
+            <div className="stat-desc">来自该来源的文档块</div>
           </div>
         ))}
       </div>
 
-      <div style={{ marginTop: 12 }}>
-        <div className="row-key" style={{ marginBottom: 4 }}>
-          MySQL 表（各行数）
+      <div style={{ marginTop: "var(--sp-16)" }}>
+        <div className="row-key" style={{ marginBottom: "var(--sp-4)" }}>
+          业务数据表（行数）
         </div>
         {tables.length === 0 && (
-          <div className="notice notice-warn" style={{ marginTop: 4 }}>
-            {schema?.error ?? "尚未获取到表结构（请检查 .env 中的 MySQL 配置）"}
-          </div>
+          <div className="notice notice-warn">暂时无法读取业务数据表，稍后重试或到后台日志查看原因。</div>
         )}
         {tables.map((table) => (
           <div className="row" key={table.table}>
-            <span className="row-key">
-              {table.label ?? table.table}
-              <span style={{ color: "var(--text-faint)", fontSize: 11 }}>{table.table}</span>
-            </span>
-            <span className="row-val">
-              {table.exists ? `${table.row_count ?? 0} 行` : "不存在"}
-            </span>
+            <span className="row-key">{table.label ?? "业务数据表"}</span>
+            <span className="row-val">{table.exists ? fmt(table.row_count, "行") : "—"}</span>
           </div>
         ))}
       </div>

@@ -1,12 +1,17 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import AuthDialog from "@/components/AuthDialog";
+import ThemeToggle from "@/components/ThemeToggle";
+import ToastStack, { useToasts } from "@/components/chat/Toast";
 import StatusCards from "@/components/admin/StatusCards";
 import DataOverview from "@/components/admin/DataOverview";
 import DebugConsole from "@/components/admin/DebugConsole";
+import EvalCard from "@/components/admin/EvalCard";
 import SchemaCard from "@/components/admin/SchemaCard";
 import HistorySearch from "@/components/admin/HistorySearch";
+import Icon from "@/components/ui/icons";
 import {
   api,
   getToken,
@@ -18,13 +23,18 @@ import {
 } from "@/lib/api";
 
 /**
- * 后台管理页 /admin：集中展示系统状态、数据概览、调试控制台（建库日志）、
- * MySQL 表结构（可展开）与历史检索，并提供一个「返回对话」入口。
- *
- * 【为什么单独一页】
- *   主对话页要尽量干净（只留对话），把偏「管理/运维」的内容都收拢到这里；
- *   数据由本页自己拉取（health / kb / schema / ingest / me），与主页面互不影响。
+ * 后台管理页：系统状态（模型 / 数据 / 工具）、数据概览、调试控制台、评测结果、
+ * 表结构与历史检索。数据由本页统一拉取，子组件只负责展示。
  */
+
+/** 自动刷新间隔（毫秒） */
+const AUTO_REFRESH_MS = 30_000;
+
+function clockText(): string {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
 
 export default function AdminPage() {
   const [health, setHealth] = useState<Health | null>(null);
@@ -32,10 +42,17 @@ export default function AdminPage() {
   const [schema, setSchema] = useState<SchemaResponse | null>(null);
   const [ingest, setIngest] = useState<IngestStatus | null>(null);
   const [loading, setLoading] = useState(false);
-  const [banner, setBanner] = useState<string | null>(null);
+  /** 首次加载是否已完成（用于骨架屏） */
+  const [loadedOnce, setLoadedOnce] = useState(false);
+  const [error, setError] = useState<{ message: string; detail?: string } | null>(null);
+  const [lastUpdated, setLastUpdated] = useState<string | null>(null);
+  const [autoRefresh, setAutoRefresh] = useState(false);
   const [user, setUser] = useState<User | null>(null);
+  const [authOpen, setAuthOpen] = useState(false);
 
-  /** 拉取后台所需数据；refresh=true 时带上 schema 强制刷新 */
+  const [toasts, pushToast] = useToasts();
+
+  /** 拉取后台所需数据 */
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
@@ -43,24 +60,38 @@ export default function AdminPage() {
       setHealth(h);
       setKb(k);
       setSchema(s);
-      setBanner(null);
+      setError(null);
+      setLastUpdated(clockText());
     } catch (e) {
-      setBanner(`无法连接后端 ${e instanceof Error ? e.message : String(e)}。请确认后端已在 8000 端口启动。`);
+      const detail = e instanceof Error ? e.message : String(e);
+      setError({ message: "服务暂时不可用，请稍后重试。", detail });
     } finally {
       setLoading(false);
+      setLoadedOnce(true);
     }
   }, []);
 
-  /** 启动重建知识库（后端在后台跑，本页轮询进度） */
+  /** 启动重建知识库 */
   const rebuild = useCallback(async () => {
     try {
-      await api.startIngest();
+      await api.startIngest("full");
       setIngest(await api.ingestStatus());
-      setBanner(null);
+      pushToast("已开始重建知识库", "info");
     } catch (e) {
-      setBanner(`启动建库失败：${e instanceof Error ? e.message : String(e)}`);
+      pushToast(`启动失败：${e instanceof Error ? e.message : String(e)}`, "error");
     }
-  }, []);
+  }, [pushToast]);
+
+  /** 启动增量更新：只写新增/变更的块、删掉失效块，保留其余数据 */
+  const incremental = useCallback(async () => {
+    try {
+      await api.startIngest("incremental");
+      setIngest(await api.ingestStatus());
+      pushToast("已开始增量更新", "info");
+    } catch (e) {
+      pushToast(`启动失败：${e instanceof Error ? e.message : String(e)}`, "error");
+    }
+  }, [pushToast]);
 
   useEffect(() => {
     void refresh();
@@ -72,6 +103,13 @@ export default function AdminPage() {
       }
     })();
   }, [refresh]);
+
+  // 自动刷新 30s
+  useEffect(() => {
+    if (!autoRefresh) return;
+    const timer = setInterval(() => void refresh(), AUTO_REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [autoRefresh, refresh]);
 
   // 建库进行中时轮询进度
   useEffect(() => {
@@ -88,7 +126,8 @@ export default function AdminPage() {
     return () => clearInterval(timer);
   }, [ingest?.running, refresh]);
 
-  // 启动时若本地有令牌，拉一次当前用户，供「历史检索」判断登录态
+  // 启动时若本地有令牌，拉一次当前用户，供「历史检索」与写操作按钮判断登录态
+  const tokenNotified = useRef(false);
   useEffect(() => {
     if (!getToken()) return;
     let alive = true;
@@ -97,42 +136,115 @@ export default function AdminPage() {
         const res = await api.me();
         if (alive) setUser(res.user);
       } catch {
-        /* 未登录 / 令牌失效：保持未登录 */
+        if (alive && !tokenNotified.current) {
+          tokenNotified.current = true;
+          pushToast("登录已过期，请重新登录", "error");
+        }
       }
     })();
     return () => {
       alive = false;
     };
-  }, []);
+  }, [pushToast]);
 
   return (
     <div className="admin">
-      <div className="admin-header">
+      <div className="admin-head">
         <div className="admin-title">
           <span className="brand-logo">标</span>
           后台控制台
         </div>
-        <Link className="admin-back" href="/">
-          ← 返回对话
+        {lastUpdated && <span className="admin-last-updated">最后更新 {lastUpdated}</span>}
+        <button
+          className={`chip ${autoRefresh ? "chip-on" : ""}`}
+          type="button"
+          onClick={() => setAutoRefresh((v) => !v)}
+          aria-pressed={autoRefresh}
+          title="开启后每 30 秒自动刷新一次"
+        >
+          <Icon name="refresh" size={13} />自动刷新 30s
+        </button>
+        <button className="btn" type="button" onClick={() => void refresh()} disabled={loading} style={{ width: "auto" }}>
+          <Icon name="refresh" size={14} />
+          {loading ? "刷新中…" : "刷新"}
+        </button>
+        <ThemeToggle />
+        <Link className="btn" href="/" style={{ width: "auto" }}>
+          返回对话
         </Link>
       </div>
 
-      {banner && <div className="notice notice-danger" style={{ marginBottom: 14 }}>{banner}</div>}
+      {error && (
+        <div className="err-block">
+          <div className="err-title">
+            <Icon name="alert" size={16} />
+            {error.message}
+          </div>
+          <div className="err-actions">
+            <button className="btn btn-primary" type="button" onClick={() => void refresh()}>
+              重试
+            </button>
+          </div>
+          {error.detail && (
+            <details className="err-detail">
+              <summary>技术详情</summary>
+              <pre>{error.detail}</pre>
+            </details>
+          )}
+        </div>
+      )}
 
       <div className="admin-grid">
         <div className="admin-card admin-span-all">
           <div className="admin-card-title">系统状态</div>
-          <StatusCards health={health} kb={kb} schema={schema} />
+          {loadedOnce ? (
+            <StatusCards health={health} kb={kb} schema={schema} />
+          ) : (
+            <div className="stat-grid">
+              {[0, 1, 2, 3, 4, 5].map((i) => (
+                <div className="stat-card" key={i}>
+                  <div className="skeleton skel-line" style={{ width: "40%" }} />
+                  <div className="skeleton skel-line" style={{ width: "70%" }} />
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         <DataOverview kb={kb} schema={schema} />
 
-        <DebugConsole ingest={ingest} loading={loading} onRebuild={() => void rebuild()} onRefresh={() => void refresh()} />
+        <DebugConsole
+          ingest={ingest}
+          loading={loading}
+          loggedIn={Boolean(user)}
+          onRebuild={() => void rebuild()}
+          onIncremental={() => void incremental()}
+          onRefresh={() => void refresh()}
+          onLogin={() => setAuthOpen(true)}
+          onToast={pushToast}
+        />
+
+        <EvalCard />
 
         <SchemaCard schema={schema} />
 
         <HistorySearch user={user} />
       </div>
+
+      {/* 复用主页面同一套登录弹窗：登录成功后更新登录态并刷新，使写操作按钮可用 */}
+      {authOpen && (
+        <AuthDialog
+          onClose={() => setAuthOpen(false)}
+          onSuccess={(u) => {
+            setUser(u);
+            setAuthOpen(false);
+            pushToast(`已登录：${u.username}`, "success");
+            void refresh();
+          }}
+        />
+      )}
+
+      <ToastStack toasts={toasts} />
     </div>
   );
 }
