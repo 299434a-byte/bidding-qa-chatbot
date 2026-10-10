@@ -1,5 +1,7 @@
 # 招投标智能问答机器人（bidding-qa-chatbot）
 
+[![CI](https://github.com/299434a-byte/bidding-qa-chatbot/actions/workflows/ci.yml/badge.svg)](https://github.com/299434a-byte/bidding-qa-chatbot/actions/workflows/ci.yml) **仓库地址**：<https://github.com/299434a-byte/bidding-qa-chatbot>
+
 > **一句话定位**：把招投标业务库里的结构化数据「翻译」成可检索的知识，让使用者用**一句自然语言**就能查公告、比项目、算统计、追关系——答案带出处，不编造。
 
 ## 它解决什么问题
@@ -285,6 +287,10 @@ cd backend
 |---|---|---|
 | `test`（后端） | `pip install -r requirements.txt` + `pytest` | 在 `backend/` 下运行，覆盖率门槛随 `pytest.ini` 一起生效 |
 | `frontend-typecheck` | `npm ci` + `npx tsc --noEmit` | 只做 TypeScript 类型检查，**不跑 `next build`**——构建需要完整的 Next.js 环境且耗时数倍，类型检查已能拦住绝大多数回归 |
+
+- 完整运行记录见 [Actions](https://github.com/299434a-byte/bidding-qa-chatbot/actions/workflows/ci.yml)（最近一次：**两个 job 全绿**，总耗时 46 秒）。
+
+![CI 两个 job 全绿](docs/ci-actions.png)
 
 ## 已知限制
 
