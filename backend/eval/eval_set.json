@@ -1,0 +1,132 @@
+{
+  "_说明": "评测题集。所有题目与 expect_doc_ids 均来自知识库真实记录：expect_doc_ids 是「用该问题跑检索、正确答案确实出现在返回结果里」的那个块，格式 '<表名>:<project_name>:<chunk_index>'。原文类题目用自然问法（不把答案词塞进问题），统计/关系类答案分别在 PostgreSQL 与 Neo4j 图库，不在向量库。",
+  "_知识库现状": {
+    "qdrant_points": 9164,
+    "procurement_notices_points": 8231,
+    "projects_points": 933,
+    "pg_procurement_notices_rows": 933,
+    "pg_projects_rows": 933,
+    "graph": "Project -[PUBLISHED]-> Notice，各 933 个节点"
+  },
+  "items": [
+    {
+      "id": "Q1",
+      "question": "投标人需要具备什么资质要求？",
+      "type": "原文",
+      "expect_doc_ids": [
+        "procurement_notices:巢湖市巢西北片区供水管网提升工程（第三批）第三方检测:3"
+      ],
+      "expect_tool": "search_bidding_knowledge",
+      "key_points": [
+        "投标人须具备建设主管部门颁发的建设工程质量检测机构资质证书",
+        "检测范围须同时包括：见证取样检测、地基基础工程检测、主体结构工程现场检测",
+        "或具备建设工程质量检测机构专项资质证书／综合资质证书"
+      ]
+    },
+    {
+      "id": "Q2",
+      "question": "开标时间和开标地点是什么？",
+      "type": "原文",
+      "expect_doc_ids": [
+        "procurement_notices:2024年安徽农垦潘村湖农场高标准农田建设项目:4"
+      ],
+      "expect_tool": "search_bidding_knowledge",
+      "key_points": [
+        "开标时间：2024年08月22日11时00分",
+        "开标地点：合肥市滨湖新区南京路2588号要素交易市场A区（徽州大道与南京路交口）2楼8号开标室"
+      ]
+    },
+    {
+      "id": "Q3",
+      "question": "招标文件怎么获取？",
+      "type": "原文",
+      "expect_doc_ids": [
+        "procurement_notices:S10扬州至淮南高速公路滁州段项目施工监理:10"
+      ],
+      "expect_tool": "search_bidding_knowledge",
+      "key_points": [
+        "获取时间：2024年7月30日至2024年8月20日11时00分",
+        "获取方式：潜在投标人须登录安徽（区域）公共资源交易电子服务系统查阅/获取招标文件"
+      ]
+    },
+    {
+      "id": "Q4",
+      "question": "投标保证金可以采用哪些形式缴纳？",
+      "type": "原文",
+      "expect_doc_ids": [
+        "procurement_notices:2024年度宁国管理处等营运单位收费站及服务区园区污水处理设施改造提升工程:7"
+      ],
+      "expect_tool": "search_bidding_knowledge",
+      "key_points": [
+        "第一类：银行转账或银行电汇",
+        "第二类：银行保函、担保机构担保或保证保险",
+        "第三类：电子保函"
+      ]
+    },
+    {
+      "id": "Q5",
+      "question": "知识库中的 projects 表一共收录了多少个招标项目？",
+      "type": "统计",
+      "expect_doc_ids": [],
+      "expect_tool": "query_bidding_postgres",
+      "key_points": [
+        "projects 表共 933 个项目"
+      ]
+    },
+    {
+      "id": "Q6",
+      "question": "projects 表里预算金额（budget_amount）最高的项目是哪个？金额是多少？",
+      "type": "统计",
+      "expect_doc_ids": [],
+      "expect_tool": "query_bidding_postgres",
+      "key_points": [
+        "项目名称：宇桥生态科技产业园及宇桥湖、滁河干渠生态综合治理项目",
+        "预算金额：528057.00 万元（约 52.8 亿元）"
+      ]
+    },
+    {
+      "id": "Q7",
+      "question": "projects 表中项目名称包含“道路”二字的项目一共有多少个？",
+      "type": "统计",
+      "expect_doc_ids": [],
+      "expect_tool": "query_bidding_postgres",
+      "key_points": [
+        "共 39 个项目名称包含“道路”"
+      ]
+    },
+    {
+      "id": "Q8",
+      "question": "知识图谱里 Project 和 Notice 两类节点之间是什么关系？大概有多少条这样的关系？",
+      "type": "关系",
+      "expect_doc_ids": [],
+      "expect_tool": "query_bidding_graph",
+      "key_points": [
+        "关系类型为 PUBLISHED",
+        "方向为 Project -[PUBLISHED]-> Notice",
+        "约 933 条关系"
+      ]
+    },
+    {
+      "id": "Q9",
+      "question": "知识图谱中 Project 节点和 Notice 节点各有多少个？",
+      "type": "关系",
+      "expect_doc_ids": [],
+      "expect_tool": "query_bidding_graph",
+      "key_points": [
+        "Project 节点 933 个",
+        "Notice 节点 933 个"
+      ]
+    },
+    {
+      "id": "Q10",
+      "question": "“宇桥生态科技产业园及宇桥湖、滁河干渠生态综合治理项目”在知识图谱中通过 PUBLISHED 关系关联到了哪条采购公告？",
+      "type": "关系",
+      "expect_doc_ids": [],
+      "expect_tool": "query_bidding_graph",
+      "key_points": [
+        "关联到同名的 Notice（采购公告）节点",
+        "该项目与采购公告一一对应（Project 发布 Notice）"
+      ]
+    }
+  ]
+}
