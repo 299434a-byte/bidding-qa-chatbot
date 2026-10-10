@@ -2,7 +2,7 @@
 # 文件：copy_mysql.py —— 「远程 MySQL → 本机 MySQL」的整库拷贝脚本（备用方案）
 #
 # 【这个脚本是干什么的】
-#   把远程局域网 MySQL（192.168.x.x）里 bidding_information_dai 库的两张业务表
+#   把远程局域网 MySQL（地址从 .env 的 MYSQL_HOST 读取）里 bidding_information_dai 库的两张业务表
 #   （procurement_notices 采购公告、projects 招标项目）整表复制到「本机 MySQL」
 #   （默认 127.0.0.1:3306）。拷贝完成后，即使远程库连不上，本机也有一份能用的副本。
 #
