@@ -141,6 +141,7 @@ from langchain_core.messages import HumanMessage
 # 【注意事项】这里用的是三行式的括号导入，行尾没有逗号问题，改动时务必保持括号闭合。
 from .agent import (
     _build_agent,
+    _citation_check,
     _new_states,
     _new_turn_state,
     _snapshot_rag_state,
@@ -890,6 +891,16 @@ async def run_deep_events(
         yield {"type": "delta", "text": fallback, "channel": "answer"}
         # 【这行在干什么】把 answer 更新为兜底内容，这样后面的自评能拿到一份非空答案。
         answer = fallback
+
+    # 【引用校验】solve 的正文已全部推给前端（无法撤回），这里对「完整答案」补做一次体检。
+    # 【为什么放在这个位置（关键）】自评阶段要审的是「待审答案」，而它必须是**已通过校验的版本**——
+    #   若把带坏引用的原文丢给自评，等于让模型去审一份明知有问题的稿子。所以校验要发生在
+    #   solve 之后、自评之前，并用它返回的「已校验文本」覆盖 answer，供下一步 current = answer 使用。
+    # 【为什么放在兜底分支之后】兜底答案也是 solve 的产出，应当一并纳入校验。
+    # 【通过 / 无来源 / 校验器异常时】返回空事件列表，且 answer 原样不变——行为与改造前一字不差。
+    citation_events, answer = _citation_check(answer, sources)
+    for event in citation_events:
+        yield event
 
     # --- 阶段 4：自评与修订（仅 deep） -------------------------------------- #
     # 【这行在干什么】三个条件同时满足才做自评：①是 deep 模式；②配置允许至少 1 轮自评；

@@ -244,6 +244,30 @@ def _parse_table_labels(raw: str) -> dict[str, str]:
     return labels
 
 
+def _parse_primary_keys(raw: str) -> dict[str, str]:
+    """解析「表名=列名」映射，用于给「无主键表」声明主键兜底。
+
+    【什么时候用得上】PG 里若某张表没有 PRIMARY KEY 约束，建库管道就不知道该拿
+    哪一列当 doc_id 的稳定标识，只能退化成「行号+1」——而行号依赖查询顺序，
+    重跑很可能产生重复点。KB_PRIMARY_KEYS 允许手写一份兜底声明，形如：
+        KB_PRIMARY_KEYS=procurement_notices=project_name,projects=project_name
+    【解析规则】与 TABLE_LABELS 完全一致：逗号分隔、只按第一个等号切、两边都非空才收。
+    """
+    # 结果字典从空开始（一张表都没声明兜底键时就是空字典）。
+    result: dict[str, str] = {}
+    for item in raw.split(","):
+        item = item.strip()
+        # 跳过空段与不含等号的非法段。
+        if not item or "=" not in item:
+            continue
+        # 只按「第一个等号」切，避免列名里含等号时切错。
+        table, _, column = item.partition("=")
+        # 表名与列名都非空才收，防止半截配置污染结果。
+        if table.strip() and column.strip():
+            result[table.strip()] = column.strip()
+    return result
+
+
 # 【这行在干什么】@dataclass 让 Python 自动生成构造函数等样板代码；
 #   frozen=True 则让这个类的实例「创建后不可修改」。
 # 【为什么 frozen=True 很重要（关键设计）】配置对象会被全项目到处共享。
@@ -276,6 +300,12 @@ class Settings:
     kb_tables: tuple[str, ...]
     # 【这行在干什么】「表名 → 中文展示名」的映射字典；从 TABLE_LABELS 读（可覆盖默认）。
     table_labels: dict[str, str]
+    # 【这行在干什么】建库管道的数据源开关；从 KB_SOURCE 读。
+    # 【取值】mysql（默认，行为与改动前完全一致）/ postgres（改读本机 PG 副本）。
+    kb_source: str
+    # 【这行在干什么】「表名 → 兜底主键列名」映射；从 KB_PRIMARY_KEYS 读。
+    # 【为什么需要】PG 某表没有 PRIMARY KEY 约束时，用它声明该拿哪一列当稳定标识。
+    kb_primary_keys: dict[str, str]
 
     # 【这行在干什么】纯注释，标出下面一组字段属于「向量库」配置。
     # 向量库
@@ -514,6 +544,29 @@ class Settings:
     # 【这行在干什么】锁定时长秒数（默认 300=5 分钟）；从 AUTH_LOCKOUT_SECONDS 读。
     auth_lockout_seconds: int
 
+    # 【这行在干什么】纯注释，标出下面一组字段属于「问答缓存 / 指标 / 日志」配置。
+    # 问答缓存 / 可观测性指标 / 日志（都是本地产物，统一落在 backend/data/ 目录下）
+    # 【这行在干什么】问答缓存的 SQLite 库文件路径；从 CACHE_DB_PATH 读。
+    # 【默认值】未配置时落在 backend/data/answer_cache.db。
+    cache_db_path: Path
+    # 【这行在干什么】缓存有效期秒数（默认 3600 = 1 小时）；从 CACHE_TTL 读。
+    # 【作用】超过这个时长的缓存条目视为过期，查询时当作「未命中」。
+    cache_ttl: int
+    # 【这行在干什么】问答指标的 SQLite 库文件路径；从 METRICS_DB_PATH 读。
+    # 【默认值】未配置时落在 backend/data/metrics.db。
+    metrics_db_path: Path
+    # 【这行在干什么】日志级别（默认 INFO）；从 LOG_LEVEL 读。取值如 DEBUG / INFO / WARNING / ERROR。
+    log_level: str
+    # 【这行在干什么】日志文件路径；从 LOG_FILE_PATH 读。默认落在 backend/data/app.log。
+    log_file_path: Path
+
+    # 【这行在干什么】纯注释，标出下面一组字段属于「跨域（CORS）」配置。
+    # 跨域（CORS）—— 允许哪些前端来源跨域调用本 API
+    # 【这行在干什么】跨域来源白名单；从 CORS_ORIGINS 读（逗号分隔）。
+    # 【为什么不用 "*"】"*" 等于放行任意网站，任何站点都能借用户浏览器调用本接口；
+    #   白名单只放行自己信任的前端地址。默认仅本机前端的两个常见地址。
+    cors_origins: tuple[str, ...]
+
     # 【这行在干什么】纯注释，标出下面一组字段属于「深度推理模式」配置。
     # 深度推理模式（Plan-and-Solve + Reflection，由前端模式选择器触发）
     # 【这行在干什么】深度推理最多几个大步骤（默认 4）；从 DEEP_MAX_STEPS 读。
@@ -663,6 +716,13 @@ class Settings:
         #   在映射字典里查这个表；查不到时用第二个参数（table 本身）作为默认值。
         return self.table_labels.get(table, table)
 
+    # 【这行在干什么】判断建库管道是否改读本机 PostgreSQL 副本。
+    @property
+    def kb_source_is_postgres(self) -> bool:
+        """True = 走 PG 数据源；False = 走 MySQL（默认，保持改动前行为）。"""
+        # 【为什么做归一化】容忍大小写与几种常见写法（pg / postgres / postgresql）。
+        return self.kb_source.strip().lower() in {"pg", "postgres", "postgresql"}
+
 
 # 【这行在干什么】定义函数 _build_settings：真正「组装」出配置对象。
 # 【为什么单独拆个函数（与下面 get_settings 配合）】把「构建」和「缓存」分开：
@@ -681,6 +741,14 @@ def _build_settings() -> Settings:
     #   · tuple(...) —— 把结果收集成一个元组（不可变的表清单）。
     tables = tuple(
         t.strip() for t in _str("KB_TABLES", "bidding_notices,bidding_project,companies").split(",") if t.strip()
+    )
+    # 【这行在干什么】解析跨域来源白名单：与上面的 tables 同一套写法
+    #   （读配置 → 按逗号拆 → 去首尾空白 → 丢弃空段 → 收集成元组）。
+    # 【为什么给默认值】没配 CORS_ORIGINS 时只放行本机前端的两个常见地址，不再放行任意来源。
+    cors_origins = tuple(
+        o.strip()
+        for o in _str("CORS_ORIGINS", "http://127.0.0.1:3000,http://localhost:3000").split(",")
+        if o.strip()
     )
     # 【这行在干什么】用 Settings(...) 构造配置对象，把所有字段一个个填上。
     # 【写法说明】下面每一个参数都是「读环境变量 + 兜底默认值」的形式，
@@ -701,6 +769,10 @@ def _build_settings() -> Settings:
         # 【这行在干什么】解析表名→中文名的映射：先读 TABLE_LABELS（默认空串），
         #   交给 _parse_table_labels 解析；因为该函数从默认字典起手，空串时也能正常返回默认映射。
         table_labels=_parse_table_labels(_str("TABLE_LABELS")),
+        # 【这行在干什么】建库管道数据源开关：不设 KB_SOURCE 时默认 mysql，行为与改动前一字不差。
+        kb_source=_str("KB_SOURCE", "mysql"),
+        # 【这行在干什么】无主键表的主键兜底声明（仅在 PG 表缺 PK 约束时才起作用）。
+        kb_primary_keys=_parse_primary_keys(_str("KB_PRIMARY_KEYS")),
         # ---------------- 向量库 ---------------- #
         qdrant_path=_path("QDRANT_PATH", "./data/qdrant"),
         qdrant_collection=_str("QDRANT_COLLECTION", "bidding_kb"),
@@ -795,6 +867,20 @@ def _build_settings() -> Settings:
         auth_pbkdf2_iterations=_int("AUTH_PBKDF2_ITERATIONS", 200000),
         auth_max_login_attempts=_int("AUTH_MAX_LOGIN_ATTEMPTS", 5),
         auth_lockout_seconds=_int("AUTH_LOCKOUT_SECONDS", 300),
+        # ---------------- 问答缓存 / 指标 / 日志 ---------------- #
+        # 【这行在干什么】缓存/指标/日志三个本地产物的路径。
+        # 【为什么默认写成 ./backend/data/...（关键）】_path 以「项目根目录」为基准解析，
+        #   所以 ./backend/data/answer_cache.db 最终落在 <项目根>/backend/data/answer_cache.db，
+        #   与「不要动 data/qdrant」的项目根 data/ 目录天然分开，互不影响。
+        cache_db_path=_path("CACHE_DB_PATH", "./backend/data/answer_cache.db"),
+        # 【这行在干什么】缓存有效期（秒），默认 3600。
+        cache_ttl=_int("CACHE_TTL", 3600),
+        metrics_db_path=_path("METRICS_DB_PATH", "./backend/data/metrics.db"),
+        # 【这行在干什么】日志级别，默认 INFO。
+        log_level=_str("LOG_LEVEL", "INFO"),
+        log_file_path=_path("LOG_FILE_PATH", "./backend/data/app.log"),
+        # ---------------- 跨域（CORS） ---------------- #
+        cors_origins=cors_origins,
         # ---------------- 深度推理模式 ---------------- #
         deep_max_steps=_int("DEEP_MAX_STEPS", 4),
         deep_step_max_steps=_int("DEEP_STEP_MAX_STEPS", 6),

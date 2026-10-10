@@ -173,6 +173,14 @@ from .rag import (
     retrieval_only_answer,
 )
 
+# 【这行在干什么】引入引用校验器的两个函数（与 rag.py 用的是同一套，算法不分叉）。
+# 【为什么 Agent 链路也必须接（血泪教训）】前端实际走的是 /api/agent/chat → agent_events，
+#   如果只把校验接在 rag.py，演示路径上校验器完全不生效。这里把它接进 ReAct 通路与深度模式。
+# 【参数逐个解释】
+#   · verify_citations —— 校验累计正文里的引用编号与数字有没有依据（纯本地、不联网）；
+#   · strip_bad_refs   —— 只删「校验没通过」的引用标记，得到一份修订稿。
+from .citation import strip_bad_refs, verify_citations
+
 # 【这行在干什么】引入重排函数（检索完再精筛一遍，同 rag.py 的做法）。
 from .rerank import rerank_hits
 
@@ -680,8 +688,51 @@ def _iter_update_messages(payload: Any) -> list[Any]:
 #   这两个标记被"翻译函数"写、"调用方"读，所以要放在一个共享的字典里传递。
 def _new_turn_state() -> dict[str, Any]:
     """一次 ReAct 轮次的跨事件状态（供事件翻译与调用方共同读取）。"""
-    # 【这行在干什么】返回初始状态：还没调过工具、还没发过来源。
-    return {"tool_called": False, "sources_emitted": False}
+    # 【这行在干什么】返回初始状态：还没调过工具、还没发过来源、正文还是空的。
+    # 【answer_parts 是干什么的】把本轮真正发给用户的正文（delta）一段段攒起来。
+    #   正文已经流到前端、无法撤回，所以要在生成完之后靠这份「累计正文」做引用校验。
+    #   深度模式的子任务传 emit_delta=False，那些正文不会被记账（只有用户看到的才算数）。
+    return {"tool_called": False, "sources_emitted": False, "answer_parts": []}
+
+
+# 【这行在干什么】定义辅助函数 _citation_check：对累计正文做一次引用校验。
+# 【参数逐个解释】
+#   · answer_text —— 本轮真正发给用户的「累计正文」（由 turn["answer_parts"] 拼成）；
+#   · sources —— 本轮的来源列表（state["sources"]）。
+# 【返回值】一个二元组 ``(要追加的事件列表, 供后续阶段使用的“已校验文本”)``：
+#   · 通过 / 没有来源 / 校验器自身异常 → ``([], answer_text)``，
+#     此时调用方一个额外事件都不发，行为与改造前一字不差；
+#   · 失败 → ``([citation_check 事件, revision 正文事件], 删除坏引用后的文本)``。
+# 【为什么要单独抽成函数（关键）】① 让「累计+校验+产出修订」这段逻辑集中一处，
+#   测试时用假 sources 直接调它即可，不必真的起 Agent、连大模型；
+#   ② 深度模式（deep_agent.py）与 ReAct 通路可以共用同一份实现，避免逻辑漂移。
+# 【revision 事件为什么带 reason="citation"】深度模式的修订稿也用 channel="revision"，
+#   前端要把这两者区分开，所以用 reason 字段标明"这一份是引用校验产生的"。
+def _citation_check(
+    answer_text: str,
+    sources: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], str]:
+    """对累计正文做引用校验，返回（要追加的事件, 已校验文本）。"""
+    # 【这行在干什么】本轮没有来源就没有可比对的依据，直接放行（不产生任何事件）。
+    if not sources:
+        return [], answer_text
+    # 【这行在干什么】校验器算「附加信息」，任何意外都静默：出错就当没校验，原样放行。
+    try:
+        check = verify_citations(answer_text, sources)
+    except Exception:  # noqa: BLE001 - 校验失败绝不能把已经成功的问答搞挂
+        return [], answer_text
+    # 【这行在干什么】校验通过：同样原样放行，不产生任何额外事件（保证行为一字不差）。
+    if check.get("ok"):
+        return [], answer_text
+    # 【这行在干什么】校验失败：删掉坏引用得到修订稿，并组织两条要发的事件。
+    revised = strip_bad_refs(answer_text, check.get("bad_refs") or [])
+    events = [
+        # 先发校验结果（前端据此弹提示、并把 issues 挂到消息上）。
+        {"type": "citation_check", "ok": False, "issues": check.get("issues") or []},
+        # 再发修订正文（channel="revision" 单独渲染，reason 标明来自引用校验）。
+        {"type": "delta", "channel": "revision", "reason": "citation", "text": revised},
+    ]
+    return events, revised
 
 
 # 【这行在干什么】定义函数 _new_states：造出一次问答所需的全部"回收字典"。
@@ -921,6 +972,11 @@ async def _stream_react_turn(
                 #   如果当成 delta 发出去，用户会看到答案里混进一堆半成品。
                 #   但如果干脆什么都不发，调用方又拿不到子任务的结论（delta 被抑制后
                 #   就没有任何通道能取到文本）——所以改个名字发，各用各的。
+                # 【这行在干什么】只有真正发给用户的正文（emit_delta=True）才记进本轮累计，
+                #   供结尾做引用校验；emit_delta=False 的深度子任务走 step_text，不计入。
+                # 【为什么用 setdefault】防止某个调用方自造的 turn 字典没带 answer_parts 键时报错。
+                if emit_delta:
+                    turn.setdefault("answer_parts", []).append(chunk.content)
                 yield {"type": "delta" if emit_delta else "step_text", "text": chunk.content}
             # 【这行在干什么】messages 流处理完了，跳到下一次循环。
             # 【为什么要 continue】防止代码"掉"到下面那段（那段是专门处理 updates 流的）。
@@ -1135,6 +1191,19 @@ async def agent_events(
         yield {"type": "done", "mode": "agent_failed"}
         # 【这行在干什么】结束生成器。
         return
+
+    # 【引用校验】ReAct 执行已结束，正文也全部流到前端了；这里对「本轮累计正文」补做一次体检。
+    # 【为什么放在 done 之前】用户明确要求：校验事件要在收尾之前发出，前端才好把它和这轮答案关联起来。
+    # 【为什么用 turn["answer_parts"]】它正是本轮所有真·正文 delta 拼起来的完整回答。
+    #   emit_delta=False 的深度子任务不会计入（它们不是用户看到的答案）。
+    # 【通过时行为与改造前一字不差】_citation_check 通过 / 无来源 / 异常都会返回空事件列表，
+    #   下面这段一个事件都不发，done 与之前完全相同。
+    citation_events, _ = _citation_check(
+        "".join(turn.get("answer_parts") or []),
+        state.get("sources") or [],
+    )
+    for event in citation_events:
+        yield event
 
     # 【这行在干什么】一切顺利：发 done 事件收尾，并用"本轮是否调过工具"决定最终标记。
     # 【两个取值的含义】agent_rag = 走了知识库/工具检索（前端显示"已调用…"类徽标）；

@@ -87,6 +87,14 @@ from .rerank import rerank_hits
 #   · retrieve —— 混合检索的主入口（dense 语义路 + BM25 字面路 → RRF 融合）。
 from .retriever import RetrievalResult, retrieve
 
+# 【这行在干什么】引入引用校验器的两个函数。
+# 【为什么需要】回答已通过 SSE 流式发到前端、无法撤回，只能在生成完之后补做一次「引用体检」：
+#   发现引用了不存在的来源、或数字没依据时，产出修订稿让前端覆盖展示。
+# 【参数逐个解释】
+#   · verify_citations —— 校验回答里的引用编号与数字有没有依据（不联网、纯本地）；
+#   · strip_bad_refs —— 只把「校验没通过」的引用标记删掉，通过的保持原样。
+from .citation import strip_bad_refs, verify_citations
+
 # 【这行在干什么】定义系统提示词 SYSTEM_PROMPT：写给大模型看的「工作守则」。
 # 【为什么它如此重要】大模型本身是个「什么都知道」的通才，但招投标问答要求「只信资料、
 #   不编造」。这份守则把它框成：①只依据参考资料；②引用要标 [参考资料N]；③资料不够就
@@ -466,6 +474,11 @@ def answer_events(
     #   先发一个空 delta，前端进入「已就绪」状态，打字机效果更平滑。
     # 【注意事项】前端必须能容忍空 text 的 delta 事件（不应渲染出空白段落）。
     yield {"type": "delta", "text": ""}  # 提前建立连接，前端可立即开始渲染
+    # 【这行在干什么】准备一个列表，把流式出来的每一段正文顺带攒起来。
+    # 【为什么要攒】正文已经一段段发给前端了、无法撤回；等生成完要做「引用校验」时，
+    #   必须有一份「完整回答」在手，所以边发边攒。攒下来的内容不改变任何已发出的字节，
+    #   因此「校验通过时行为与现在逐字节一致」这条硬要求不受影响。
+    answer_parts: list[str] = []
     # 【这行在干什么】打开「接住岔子」的网，包住大模型的流式调用。
     # 【为什么单独再 try 一次】检索部分已经 try 过了；大模型调用有自己的异常类型
     #   （LLMNotConfigured / LLMError），需要区分对待，所以这里单独包一层。
@@ -477,6 +490,8 @@ def answer_events(
         # 【为什么 for 循环逐段取】stream_chat 返回的也是生成器，每次迭代拿到一小段文字；
         #   这里每拿到一段就 yield 给前端，实现「边生成边推送」。
         for piece in stream_chat(build_messages(question, sources), s):
+            # 【这行在干什么】先把这一小段收进缓冲区（供结尾校验用）。
+            answer_parts.append(piece)
             # 【这行在干什么】把这一小段文字作为 delta 事件产出。
             yield {"type": "delta", "text": piece}
     # 【这行在干什么】接住「没配置大模型」的专用异常。
@@ -505,6 +520,28 @@ def answer_events(
         return
 
     # 【这行在干什么】正常走完：宣告结束，模式 llm。
-    # 【为什么 done 必须是最后一条事件】前端收到 done 就停止等待、收尾展示；
-    #   若它之后还有事件，会被前端忽略或造成混乱，所以必须作为压轴事件。
+    # 【为什么 done 仍是「正文」的压轴事件】前端收到 done 就停止等待、收尾展示正文；
+    #   所以所有「正文 delta」必须全部先于它发出——这一点和改造前完全一样。
     yield {"type": "done", "mode": "llm"}
+
+    # 【引用校验（生成后体检）】正文已全部发往前端、无法撤回，这里再对「完整回答」核对一遍引用。
+    # 【为什么放在 done 之后（关键设计）】本项目约定「正文」由 done 收尾；而修订稿是**额外的
+    #   补充事件**，走另一条通道（channel="revision"），前端把它单独渲染成「修订卡片」，
+    #   完全不干扰已经收尾的正文。这样安排的好处是：校验通过时，下面一段一个事件都不发，
+    #   整条链路的行为与改造前逐字节一致（这正是硬性要求）。
+    # 【为什么要 try 静默】校验器只是「附加信息」，绝不能因为它的任何意外（正则异常、
+    #   sources 缺字段……）把已经成功的问答弄挂。一旦出错就当没做校验，直接收摊。
+    try:
+        check = verify_citations("".join(answer_parts), sources)
+    except Exception:  # noqa: BLE001
+        check = None
+
+    # 【这行在干什么】只有「确实没通过」时才追加修订事件；通过时这里什么都不发。
+    if check is not None and not check.get("ok"):
+        # 【这行在干什么】把校验失败的引用标记删掉，得到「修订全文」。
+        revised = strip_bad_refs("".join(answer_parts), check.get("bad_refs") or [])
+        # 【这行在干什么】发出修订正文。channel="revision" 让前端把它存进 revision 字段，
+        #   渲染成「修订卡片」而不是追加到正文——所以原正文一个字都不会被覆盖或重发。
+        yield {"type": "delta", "channel": "revision", "text": revised}
+        # 【这行在干什么】再补一条校验结果事件，把问题清单（越界引用/无依据数值）交给前端提示。
+        yield {"type": "citation_check", "ok": False, "issues": check.get("issues") or []}

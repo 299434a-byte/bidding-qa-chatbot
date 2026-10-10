@@ -231,6 +231,17 @@ from .vision import resolve_mime as resolve_image_mime
 # 【联网搜索】导入工具名并改名，避免与本文件其它 TOOL_NAME 混淆。
 from .web_search import TOOL_NAME as WEB_SEARCH_TOOL_NAME
 
+# 【问答缓存】answer_cache 提供「规范化精确匹配」的问答结果缓存（注意：是精确匹配，
+# 不是向量语义匹配），以及判断「这个请求该不该进缓存」的准绳 is_cacheable。
+from . import answer_cache
+
+# 【可观测性指标】metrics 记录每轮问答的耗时 / 首字延迟 / 缓存命中 / 重排情况等，
+# 并提供 summary() 做汇总统计。起别名 metrics_store 是为了不与接口函数 /api/metrics 混淆。
+from . import metrics as metrics_store
+
+# 【日志】setup_logging 统一配置日志的输出位置与格式；get_logger 取一个日志器。
+from .logging_setup import get_logger, setup_logging
+
 # 创建 FastAPI 应用本体（就是 uvicorn 启动时导入的那个 app）。
 # title / description / version 只影响自动生成的接口文档页（/docs）上显示的说明。
 app = FastAPI(
@@ -240,16 +251,24 @@ app = FastAPI(
 )
 
 # 前端是独立的 Next.js 应用（默认 3000 端口），端口不同即「跨域」，需放行。
-# allow_origins=["*"] 表示放行任意来源（本地开发方便；生产环境应收紧为具体域名）。
-# allow_credentials=False：因为不放行跨域带 Cookie，配合 "*" 使用更安全。
+# 【为什么收紧（安全加固）】原先 allow_origins=["*"] 会放行任意网站，任何站点都能
+#   借用户浏览器跨域调用本接口；改为从 .env 的 CORS_ORIGINS 读取白名单（逗号分隔），
+#   默认只允许本机前端的两个地址。
+# allow_credentials=False：不放行跨域带 Cookie（令牌走 Authorization 头，无需 Cookie）。
 # allow_methods / allow_headers 全部放行，保证 GET/POST 等与自定义头都能通过。
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=list(get_settings().cors_origins),
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 初始化全项目日志（幂等：无论导入多少次，只会真正配置一次）。
+# 放在这里保证「应用一被导入就配好日志」，控制台与 backend/data/app.log 都能收到日志。
+setup_logging(get_settings())
+# 本模块专用的日志器（名字形如 "app.main"，日志格式里的「模块」就是它）。
+logger = get_logger(__name__)
 
 
 # --------------------------------------------------------------------------- #
@@ -278,6 +297,13 @@ class IngestRequest(BaseModel):
     # 是否「先清空再重建」。默认 True 是推荐做法：
     # 避免旧数据残留导致「同一条数据在库里出现两份」，保证结果一致。
     recreate: bool = Field(True, description="是否清空后重建（推荐 True，保证数据一致）")
+    # 【新增】建库模式："full"（默认，全量重建，行为与改动前一致）/ "incremental"（增量更新）。
+    # 【为什么默认 full（关键）】老前端不传这个字段时，行为与之前完全一样，保证向后兼容。
+    # 【为什么用 Literal 限定取值】非法值（如拼错的 "incr"）会被 FastAPI 直接拒成 422，
+    #   避免「悄悄退化成全量」这种隐蔽的错误行为。
+    mode: Literal["full", "incremental"] = Field(
+        "full", description="建库模式：full（全量）/ incremental（增量）"
+    )
 
 
 # 【一轮对话】用于把「历史聊天记录」从前端传回后端。
@@ -374,6 +400,9 @@ class _EventCollector:
         self.tool_results: list[dict[str, Any]] = []
         # 参考来源列表（命中的公告/项目原文片段与出处）。
         self.sources: list[dict[str, Any]] = []
+        # 本轮检索是否「真正应用了重排」（来自 retrieval 事件的 meta）。
+        # 用于可观测性指标统计「重排应用率」；默认 False（没收到或没生效都算没应用）。
+        self.rerank_applied = False
         # PostgreSQL 查询信息（SQL 文本、返回行数、是否出错）；没查过就是 None。
         self.sql: dict[str, Any] | None = None
         # Neo4j 图谱查询信息（Cypher 文本、返回行数、是否出错）；没查过就是 None。
@@ -408,6 +437,11 @@ class _EventCollector:
         # 工具返回结果的那一刻：记下工具名与命中条数。
         elif etype == "tool_result":
             self.tool_results.append({"name": event.get("name"), "count": event.get("count")})
+        # 检索统计事件：meta 里带「重排是否生效」（rerank_applied）。
+        # 只取这一个字段供指标统计用（其余检索统计前端会自己显示，无需在此保存）。
+        elif etype == "retrieval":
+            meta = event.get("meta") or {}
+            self.rerank_applied = bool(meta.get("rerank_applied"))
         # 参考来源事件：直接整体保存（`or []` 保证即使上游给 None 也存成空列表，
         # 避免后面遍历时对 None 报错）。
         elif etype == "sources":
@@ -563,13 +597,15 @@ def _append_log(stage: str, message: str, **_: Any) -> None:
 # 因为它在后台线程里跑，异常若没人接住，只会被打印一行警告然后静默消失，
 # 前端将永远等不到「失败」状态、一直以为还在建库中。
 # 【参数解释】recreate 表示是否先清空再重建（由请求体传入）。
-def _ingest_worker(recreate: bool) -> None:
+#   mode 表示建库模式："full"（默认，全量）/ "incremental"（增量）。
+def _ingest_worker(mode: str, recreate: bool) -> None:
     # try/except/finally 三段式：
     #   try 里做正事；except 分门别类记录失败原因；finally 无论成败都要收尾。
     try:
         # 调 ingest 模块干活，并把 _append_log 作为「进度回调」传进去，
         # 这样建库过程中的每一步都会实时反映到状态牌上（前端能看到进度在动）。
-        result = run_ingest(recreate=recreate, progress=_append_log)
+        # mode 由接口传入，决定跑全量还是增量；增量结果里的 added/updated/deleted 会随 result 一起回显。
+        result = run_ingest(recreate=recreate, progress=_append_log, mode=mode)
         # 成功：记录结果，并把 error 清空（避免上一轮的旧错误残留）。
         _update_state(result=result, error=None)
     # 数据库连不上：给出明确的「数据库不可用」提示（比笼统的「建库失败」好用得多）。
@@ -630,6 +666,11 @@ def health() -> dict[str, Any]:
         "agent_model": s.agent_model_or_default or None,
         # MySQL 是否已配置（没配就没法建知识库）。
         "mysql_configured": s.mysql_configured,
+        # 建库管道当前实际使用的数据源（"mysql" / "postgres"）。
+        # 【为什么需要】切到 PG 副本后，/api/mysql/schema 会如实显示「未连接」，
+        # 前端需要这个字段才能把卡片文案解释成「知识库数据源：PostgreSQL 副本（生产：MySQL）」，
+        # 避免与 README 截图里「已连接」的旧状态自相矛盾。
+        "kb_source": "postgres" if s.kb_source_is_postgres else "mysql",
         # PostgreSQL 是否已配置。注意：没配置时 PG 查询工具不会注册给 Agent。
         "pg_configured": s.pg_configured,
         # PostgreSQL 查询时用于「生成 SQL」的模型名。
@@ -1232,14 +1273,17 @@ async def history_search(
 #   File(...)   —— 从 multipart 表单里取上传的文件；
 #   Form("")    —— 同一份表单里的普通文本字段（提问文字，可省略）。
 #   multipart 是「一个请求里既带文件又带普通字段」的专用格式。
+# 【为什么鉴权】图片解析要调用付费的视觉模型，是消耗型接口；必须登录后才能用，
+#   否则任何人都能匿名刷这个接口，白白消耗额度。
 @app.post("/analyze-image")
 async def analyze_image(
     file: UploadFile = File(..., description="待解析的图片（jpg / png / webp，≤10MB）"),
     question: str = Form("", description="可选：随图片一起提交的提问文字"),
+    user: dict[str, Any] = Depends(auth.current_user),
 ) -> dict[str, Any]:
     """图片解析：把图片交给智谱视觉模型识别成结构化文本。
 
-    返回 400 表示图片本身不合规（类型不支持 / 体积超限）；
+    返回 401 表示未登录；400 表示图片本身不合规（类型不支持 / 体积超限）；
     返回 502 表示解析失败（未配 Key / 模型报错 / 超时）。
     """
     s = get_settings()
@@ -1395,6 +1439,62 @@ def _sse(event: dict[str, Any]) -> str:
     return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
 
+def _finalize_qa(
+    *,
+    settings: Settings,
+    question: str,
+    mode: str,
+    started: float,
+    first_token_ms: float | None,
+    sources_count: int,
+    cache_hit: bool,
+    rerank_applied: bool,
+) -> None:
+    """问答收尾的统一动作：记一条指标 + 打一行日志（两个问答入口共用）。
+
+    【为什么单独抽成一个函数】/api/chat 与 /api/agent/chat、命中缓存与未命中，
+    共四处收尾逻辑一模一样，抽出来避免复制粘贴、口径也统一。
+
+    【参数解释】
+      · settings       —— 配置（指标库路径等）；
+      · question       —— 用户原始提问（进日志，便于排查）；
+      · mode           —— 结束模式（命中缓存时传 "cache"）；
+      · started        —— 请求开始的 time.perf_counter() 值，用来算端到端耗时；
+      · first_token_ms —— 首字延迟（毫秒）；没有正文时传 None；
+      · sources_count  —— 引用来源条数；
+      · cache_hit      —— 是否命中缓存；
+      · rerank_applied —— 是否应用了重排。
+
+    【硬要求：静默降级】记指标失败绝不影响问答（metrics.record 内部已兜底）；
+    日志是标准库 logging，写日志本身设计上不会抛异常影响主流程。
+    """
+    # 端到端耗时 = 现在 - 请求开始时刻，单位换算成毫秒。
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    # 记一条指标（失败静默，返回值这里也不需要）。
+    metrics_store.record(
+        mode=mode,
+        elapsed_ms=elapsed_ms,
+        first_token_ms=first_token_ms,
+        sources_count=sources_count,
+        cache_hit=cache_hit,
+        rerank_applied=rerank_applied,
+        settings=settings,
+    )
+    # 打一行汇总日志：包含「收到提问 / 本次耗时 / 命中缓存」三项关键信息。
+    # 【%r 与 %s】%r 会把问题用引号括起来（便于看清是不是空串/带空格）；
+    #   首字延迟为 None 时显示 -1，避免日志里出现 "None ms" 这种别扭写法。
+    logger.info(
+        "收到提问 question=%r mode=%s 本次耗时=%.0fms 首字=%.0fms 命中缓存=%s 来源=%d 重排=%s",
+        question,
+        mode,
+        elapsed_ms,
+        first_token_ms if first_token_ms is not None else -1.0,
+        "是" if cache_hit else "否",
+        sources_count,
+        "是" if rerank_applied else "否",
+    )
+
+
 # 【纯 RAG 问答接口 —— 基线接口，行为不许改】
 # 【流程】先做混合检索 → 把命中结果当参考资料 → 调大模型生成回答。
 # 与 /api/agent/chat 的区别：这里不经过 Agent，模型没有「决定调不调工具」的自由，
@@ -1402,8 +1502,29 @@ def _sse(event: dict[str, Any]) -> str:
 # 【为什么是 def 而不是 async def】answer_events 本身是同步生成器，
 # 内部已经处理好异步，这里不需要 async；保持同步还能简化代码。
 @app.post("/api/chat")
-def chat(payload: ChatRequest) -> StreamingResponse:
+def chat(
+    payload: ChatRequest,
+    user: dict[str, Any] | None = Depends(auth.optional_user),
+) -> StreamingResponse:
+    # 【新增鉴权依赖 optional_user】登录了就拿到用户信息、没登录就是 None。
+    # 为什么加上它：缓存要「未登录不进缓存」，必须知道有没有登录。
+    # 这是向后兼容的改动 —— 未登录照样能问答（只是不缓存、不落库），行为不变。
     s = get_settings()
+    # 记下「收到请求」的时刻，作为指标里端到端耗时的起点。
+    request_started = time.perf_counter()
+    # 未登录 → 不缓存。
+    logged_in = bool(user)
+    # 【该不该缓存】纯 RAG 接口不涉及 deep 模式 / 多轮历史 / 联网 / 图片，故这四项一律为否。
+    cacheable = answer_cache.is_cacheable(
+        logged_in=logged_in,
+        mode="llm",
+        has_history=False,
+        web_search=False,
+        has_image=False,
+        question=payload.question,
+    )
+    # 【先查缓存】可缓存才查；命中拿到答案字典，未命中/出错一律 None（静默降级）。
+    cached = answer_cache.get_cached(payload.question, s) if cacheable else None
 
     # 定义内部「事件流」函数（闭包：能访问外层 payload、s）。
     # 【生成器】函数体里出现 yield 的函数就是生成器：每执行到 yield 就「吐」出一个值，
@@ -1412,15 +1533,82 @@ def chat(payload: ChatRequest) -> StreamingResponse:
     # 【为什么这么设计】先把「生成器」定义好，等 StreamingResponse 真开始发送时才逐行取，
     # 这就是「边生成边发送」的本质。
     def event_stream() -> Iterator[str]:
+        # 首字延迟：第一段正文出现时记一次（毫秒）；没有正文则保持 None。
+        first_token_ms: float | None = None
+        # 边转发边攒：来源、正文碎片、结束模式、是否应用重排（供写缓存与记指标）。
+        sources: list[dict[str, Any]] = []
+        answer_parts: list[str] = []
+        done_mode = "llm"
+        rerank_applied = False
+
+        # ---------------- 情况一：缓存命中，直接回放 ----------------
+        if cached is not None:
+            # 【顺序说明】cache_hit 是个「额外提示」事件，放在正文之前发，
+            # 不改变原有事件序列（正文仍需在 done 之前、done 仍是收尾）。
+            yield _sse({"type": "cache_hit"})
+            yield _sse({"type": "sources", "sources": cached.get("sources") or []})
+            yield _sse({"type": "delta", "text": cached.get("answer") or ""})
+            yield _sse({"type": "done", "mode": cached.get("mode") or "llm"})
+            # 指标 + 日志：命中缓存走的是「捷径」，耗时自然很短。
+            _finalize_qa(
+                settings=s,
+                question=payload.question,
+                mode="cache",
+                started=request_started,
+                first_token_ms=0.0,
+                sources_count=len(cached.get("sources") or []),
+                cache_hit=True,
+                rerank_applied=False,
+            )
+            yield "data: [DONE]\n\n"
+            return
+
+        # ---------------- 情况二：未命中，走完整链路 ----------------
         try:
-            # answer_events 逐个产出「事件字典」（sources → delta → done）。
+            # answer_events 逐个产出「事件字典」（retrieval → sources → delta → done）。
             # final_k=payload.top_k：传给生成器的条数（不传就用配置默认值）。
             for event in answer_events(payload.question, settings=s, final_k=payload.top_k):
+                # 转发之前先「顺手记账」：这些都是非 SSE 事件，不会改变事件顺序。
+                etype = event.get("type")
+                if etype == "delta":
+                    # 【只累计正式正文】channel 为 revision 的是「引用校验后的修订稿」，
+                    # 与 _EventCollector 口径一致，不重复计入缓存正文。
+                    if (event.get("channel") or "answer") != "revision":
+                        # 第一段正文出现时记录首字延迟（只记第一次）。
+                        if first_token_ms is None:
+                            first_token_ms = (time.perf_counter() - request_started) * 1000
+                        answer_parts.append(event.get("text") or "")
+                elif etype == "sources":
+                    sources = event.get("sources") or []
+                elif etype == "retrieval":
+                    meta = event.get("meta") or {}
+                    rerank_applied = bool(meta.get("rerank_applied"))
+                elif etype == "done":
+                    done_mode = event.get("mode") or done_mode
+                # 原样转发给前端。
                 yield _sse(event)
         except Exception as exc:  # noqa: BLE001 - 流式响应里出错只能以事件形式告知前端
             # 【流式接口的坑】连接一旦开始，就不能再返回「普通的错误 JSON」了，
             # 因为前端已经在按 SSE 格式读。所以错误也必须伪装成一个 SSE 事件发出去。
             yield _sse({"type": "error", "message": f"服务异常：{exc}"})
+
+        # 【done 之后写缓存】仅在「可缓存 + 有实际正文」时写。
+        # 写失败静默（answer_cache 内部已兜底），绝不打断已完成的问答。
+        answer_text = "".join(answer_parts).strip()
+        if cacheable and answer_text:
+            answer_cache.set_cached(payload.question, answer_text, sources, done_mode, s)
+
+        # 记指标 + 打日志（同样不产生 SSE 事件，不影响事件顺序）。
+        _finalize_qa(
+            settings=s,
+            question=payload.question,
+            mode=done_mode,
+            started=request_started,
+            first_token_ms=first_token_ms,
+            sources_count=len(sources),
+            cache_hit=False,
+            rerank_applied=rerank_applied,
+        )
         # SSE 协议规定：流结束时发一行 [DONE] 表示「到此为止」。
         yield "data: [DONE]\n\n"
 
@@ -1492,6 +1680,26 @@ async def agent_chat(
     # bool(...) 把结果规范化成 True/False（user 本身是字典或 None，不是布尔值）。
     persist = bool(user and s.history_configured)
 
+    # ---- 问答缓存相关准备 ----
+    # 记下「收到请求」的时刻，作为指标里端到端耗时的起点。
+    request_started = time.perf_counter()
+    # 复算「本次到底会不会联网」（口径与 agent.py 一致）：
+    # 未显式传 web_search 时用配置默认值，再叠加「后端是否真的配了 TAVILY_API_KEY」。
+    # 为什么要复算：联网结果有时效性，凡是「会联网」的请求都不进缓存。
+    use_web = s.web_search_default if payload.web_search is None else bool(payload.web_search)
+    use_web = bool(use_web and s.web_search_configured)
+    # 【该不该缓存】未登录 / deep 模式 / 带多轮历史 / 联网 / 疑似敏感，任一命中即不缓存。
+    cacheable = answer_cache.is_cacheable(
+        logged_in=bool(user),
+        mode=mode,
+        has_history=bool(history),
+        web_search=use_web,
+        has_image=False,
+        question=payload.question,
+    )
+    # 【先查缓存】可缓存才查；命中拿到答案字典，未命中/出错一律 None（静默降级）。
+    cached = answer_cache.get_cached(payload.question, s) if cacheable else None
+
     # 事件流生成器（async 版）。带 yield 的 async 函数是「异步生成器」，
     # 调用方要用 `async for` 遍历，正好符合这里「一边产出、一边被 StreamingResponse 取走」的需求。
     async def event_stream() -> AsyncIterator[str]:
@@ -1499,6 +1707,8 @@ async def agent_chat(
         collector = _EventCollector()
         # 会话信息（落库成功才有值；失败或未登录则为 None）。
         conversation: dict[str, Any] | None = None
+        # 首字延迟：第一段正文出现时记一次（毫秒）；没有正文则保持 None。
+        first_token_ms: float | None = None
 
         # 请求一开始就写用户消息：流中途断掉也不丢提问
         # 【为什么提前写】如果等整轮结束才写，用户中途关页面就整条都没了；
@@ -1547,6 +1757,49 @@ async def agent_chat(
             }
         )
 
+        # ---------------- 缓存命中：直接回放，不再跑 Agent ----------------
+        # 【为什么放在 conversation 事件之后】保持「首个事件永远是 conversation」的既有约定，
+        # 前端拿到会话 id 后再收到 cache_hit；同时不改变正文/ done 的相对顺序。
+        if cached is not None:
+            yield _sse({"type": "cache_hit"})
+            yield _sse({"type": "sources", "sources": cached.get("sources") or []})
+            yield _sse({"type": "delta", "text": cached.get("answer") or ""})
+            yield _sse({"type": "done", "mode": cached.get("mode") or mode})
+
+            # 落库：把缓存的这条回答也写进会话，保证历史里问答成对、不留「半截提问」。
+            # 仍遵守「落库绝不影响问答」——任何失败静默。
+            if conversation is not None:
+                try:
+                    # 先喂给收集器 sources 与 done，让写进历史的 meta 结构与正常路径一致。
+                    collector.feed({"type": "sources", "sources": cached.get("sources") or []})
+                    collector.feed({"type": "done", "mode": "cache"})
+                    await asyncio.to_thread(
+                        history_store.append_message,
+                        s,
+                        user["id"],
+                        conversation["id"],
+                        "assistant",
+                        cached.get("answer") or "",
+                        collector.meta("cache"),
+                        mode,
+                    )
+                except Exception:  # noqa: BLE001 - 落库失败不影响问答
+                    pass
+
+            # 指标 + 日志：命中缓存走的是「捷径」，耗时自然很短。
+            _finalize_qa(
+                settings=s,
+                question=payload.question,
+                mode="cache",
+                started=request_started,
+                first_token_ms=0.0,
+                sources_count=len(cached.get("sources") or []),
+                cache_hit=True,
+                rerank_applied=False,
+            )
+            yield "data: [DONE]\n\n"
+            return
+
         # 标记「用户是否中途断开了连接」。
         disconnected = False
         try:
@@ -1562,6 +1815,14 @@ async def agent_chat(
             ):
                 # 先「喂」给收集器（攒着待会落库）。
                 collector.feed(event)
+                # 记录首字延迟：第一段「正式正文」出现时记一次（只记第一次）。
+                # 【排除 revision】channel 为 revision 的是修订稿，不算「首字」。
+                if (
+                    first_token_ms is None
+                    and event.get("type") == "delta"
+                    and (event.get("channel") or "answer") != "revision"
+                ):
+                    first_token_ms = (time.perf_counter() - request_started) * 1000
                 # 再原样转发给前端（前端据此实时渲染工具徽标、逐字回答等）。
                 yield _sse(event)
                 # 用户中途断开：立刻停止，不再烧 token
@@ -1599,6 +1860,26 @@ async def agent_chat(
                 # 这里连状态都不用标记：落库失败对用户已收到的回答毫无影响，静默即可。
                 pass
 
+        # 【done 之后写缓存】仅在「可缓存 + 未断线 + 有实际正文」时写。
+        # 【为什么要求未断线】断线时正文可能是残缺的，缓存残缺答案会误导后续用户。
+        # 写失败静默（answer_cache 内部已兜底），绝不打断已完成的问答。
+        if cacheable and not disconnected and answer:
+            answer_cache.set_cached(
+                payload.question, answer, collector.sources, collector.done_mode or mode, s
+            )
+
+        # 记指标 + 打日志（不产生 SSE 事件，不影响事件顺序）。
+        _finalize_qa(
+            settings=s,
+            question=payload.question,
+            mode=collector.done_mode or mode,
+            started=request_started,
+            first_token_ms=first_token_ms,
+            sources_count=len(collector.sources),
+            cache_hit=False,
+            rerank_applied=collector.rerank_applied,
+        )
+
         # 同 /api/chat：流末尾发 [DONE] 表示结束。
         yield "data: [DONE]\n\n"
 
@@ -1624,8 +1905,18 @@ async def agent_chat(
 # 所以这里「立刻返回已启动」，真正干活另开线程；前端再定期来查进度。
 # 【注意】必须用锁「检查 + 占用」一体化：如果先解锁再启动，
 # 两个请求可能同时通过「没在跑」的检查，导致两个建库线程并发抢同一个向量库目录（会锁死/损坏）。
+# 【为什么鉴权】重建知识库会整库重灌、长时间独占向量库目录，属高危运维操作；
+#   必须登录后才能触发，避免被匿名请求随意触发而打断线上服务。
 @app.post("/api/ingest")
-def start_ingest(payload: IngestRequest) -> dict[str, Any]:
+def start_ingest(payload: IngestRequest, user: dict[str, Any] = Depends(auth.current_user)) -> dict[str, Any]:
+    # 【参数校验】增量模式不能同时要求「重建集合」：增量的前提是保留旧向量库数据，
+    #   先清空再增量在语义上自相矛盾（recreate=True 会把旧数据清掉，增量就失去意义）。
+    #   直接 400 拒绝，避免调用方误传导致数据被清空。
+    if payload.mode == "incremental" and payload.recreate:
+        raise HTTPException(
+            status_code=400,
+            detail="增量模式（mode=incremental）不能同时要求 recreate=true",
+        )
     with _state_lock:
         # 已有任务在跑就直接拒绝（409 = 冲突），避免并发建库互相破坏数据。
         if _ingest_state["running"]:
@@ -1644,11 +1935,13 @@ def start_ingest(payload: IngestRequest) -> dict[str, Any]:
 
     # 创建后台线程。参数解释：
     # target=_ingest_worker     —— 这个线程要执行哪个函数；
-    # args=(payload.recreate,)  —— 传给它的参数（注意末尾逗号：单元素元组必须带逗号，
-    #                              否则会被当成「一个被括号包住的普通值」而不是元组）；
+    # args=(payload.mode, payload.recreate) —— 传给它的参数（顺序与函数签名一致：
+    #                              先是 mode，再是 recreate）；
     # daemon=True               —— 守护线程：主程序退出时它会被一起结束，
     #                              不会出现「服务关了但线程还在跑」的情况。
-    thread = threading.Thread(target=_ingest_worker, args=(payload.recreate,), daemon=True)
+    thread = threading.Thread(
+        target=_ingest_worker, args=(payload.mode, payload.recreate), daemon=True
+    )
     # 启动线程后立刻往下走（不等它跑完），所以这个接口返回得非常快。
     thread.start()
     return {"started": True, "message": "建库任务已在后台启动，请轮询 /api/ingest/status"}
@@ -1664,6 +1957,14 @@ def start_ingest(payload: IngestRequest) -> dict[str, Any]:
 def ingest_status() -> dict[str, Any]:
     with _state_lock:
         return json.loads(json.dumps(_ingest_state, ensure_ascii=False, default=str))
+
+
+# 可观测性指标汇总：返回问答总数、平均/最大耗时、平均首字延迟、模式分布、
+# 缓存命中率、重排应用率。数字全部来自 metrics.db，读失败时返回一份空统计（不报错）。
+@app.get("/api/metrics")
+def metrics_endpoint() -> dict[str, Any]:
+    """查看问答运行指标（见 ``metrics.summary``）。"""
+    return metrics_store.summary(get_settings())
 
 
 # 根路径：浏览器直接访问 http://127.0.0.1:8000/ 时给一份「有什么接口」的清单，
@@ -1687,6 +1988,7 @@ def root() -> dict[str, Any]:
             "GET  /api/retrieve?q=",
             "POST /api/chat",
             "POST /api/agent/chat",
+            "GET  /api/metrics",
             "POST /api/auth/register",
             "POST /api/auth/login",
             "POST /api/auth/logout",
