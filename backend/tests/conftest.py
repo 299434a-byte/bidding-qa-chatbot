@@ -85,6 +85,10 @@ _FAKE_ENV = {
     "QDRANT_PATH": str(_SANDBOX / "qdrant"),
     "BM25_INDEX_PATH": str(_SANDBOX / "bm25_index.json"),
     "HISTORY_DB_PATH": str(_SANDBOX / "conversations.db"),
+    # ---- 问答缓存 / 指标 / 日志：同样指向沙箱，避免测试污染真实文件 ----
+    "CACHE_DB_PATH": str(_SANDBOX / "answer_cache.db"),
+    "METRICS_DB_PATH": str(_SANDBOX / "metrics.db"),
+    "LOG_FILE_PATH": str(_SANDBOX / "app.log"),
 }
 
 # 【为什么用「强制赋值」而不是 setdefault】

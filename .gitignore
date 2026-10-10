@@ -12,6 +12,9 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
+# 覆盖率报告（每次跑 pytest 都会重建，不入库）
+.coverage
+htmlcov/
 
 # ---------------------------- Node / Next.js ----------------------------
 node_modules/
@@ -40,6 +43,13 @@ data/*.log
 data/pip_install.log
 # 冒烟测试临时目录
 data/_smoke_*/
+
+# 后端运行产物（问答缓存库 / 指标库 / 日志，运行时自动生成，不入库）
+backend/data/*.db
+backend/data/*.db-journal
+backend/data/*.db-wal
+backend/data/*.db-shm
+backend/data/*.log
 
 # ---------------------------- AI 协作过程文档（不适合对外展示） ----------------------------
 .trae/

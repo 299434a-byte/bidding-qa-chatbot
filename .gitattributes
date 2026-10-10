@@ -1,0 +1,5 @@
+# 批处理必须以 CRLF 换行存储：cmd.exe 解析 LF-only 的 .bat 时
+# goto 标签与多行括号块可能错位，导致双击脚本行为异常。
+# 另：scripts/ 下的 .bat 用 GBK（CP936）编码保存（UTF-8 + chcp 65001
+# 会让 cmd 偶发解析错位），git 只规范换行、不改动编码字节。
+*.bat text eol=crlf
