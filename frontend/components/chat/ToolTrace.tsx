@@ -105,7 +105,7 @@ export default function ToolTrace({ sqlQueries, graphQueries, webSearches }: Pro
           </div>
           {sqlQueries.map((query, index) => (
             <QueryBlock
-              key={index}
+              key={query.sql || `sql-${index}`}
               index={index}
               code={query.sql || "（未生成 SQL）"}
               error={query.error}
@@ -126,7 +126,7 @@ export default function ToolTrace({ sqlQueries, graphQueries, webSearches }: Pro
           </div>
           {graphQueries.map((query, index) => (
             <QueryBlock
-              key={index}
+              key={query.cypher || `graph-${index}`}
               index={index}
               code={query.cypher || "（未生成 Cypher）"}
               error={query.error}
@@ -146,7 +146,7 @@ export default function ToolTrace({ sqlQueries, graphQueries, webSearches }: Pro
             <span className="badge badge-plain">点击展开来源与相关性评分</span>
           </div>
           {webSearches.map((search, searchIndex) => (
-            <details className="trace-item" key={searchIndex}>
+            <details className="trace-item" key={search.query || `web-${searchIndex}`}>
               <summary className="trace-summary">
                 搜索 {searchIndex + 1} · 关键词「{search.query || "—"}」
                 {search.error ? " · 失败" : ` · ${search.results.length} 条`}
@@ -159,8 +159,8 @@ export default function ToolTrace({ sqlQueries, graphQueries, webSearches }: Pro
               {!search.error && search.results.length === 0 && (
                 <div className="trace-note">搜索成功，但没有返回结果。</div>
               )}
-              {search.results.map((item, itemIndex) => (
-                <div className="web-item" key={`${item.url}-${itemIndex}`}>
+              {search.results.map((item) => (
+                <div className="web-item" key={item.url}>
                   <div className="web-item-head">
                     <a className="web-item-title" href={item.url} target="_blank" rel="noreferrer">
                       {item.title || item.url}

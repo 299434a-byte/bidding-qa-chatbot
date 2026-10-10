@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- 品牌标：蓝色圆角方块 + 「标」字，与站内 .brand-logo 一致 -->
+  <rect width="64" height="64" rx="14" fill="#2563EB"/>
+  <text x="32" y="43" font-size="34" font-family="PingFang SC, Microsoft YaHei, sans-serif" font-weight="600" fill="#FFFFFF" text-anchor="middle">标</text>
+</svg>

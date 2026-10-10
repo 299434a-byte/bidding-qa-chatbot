@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Icon from "@/components/ui/icons";
 import { api, setToken, type User } from "@/lib/api";
 
 type Props = {
@@ -44,8 +45,8 @@ export default function AuthDialog({ onClose, onSuccess }: Props) {
       <div className="auth-card" onClick={(e) => e.stopPropagation()}>
         <div className="auth-head">
           <div className="auth-title">{mode === "login" ? "登录" : "注册"}</div>
-          <button className="auth-close" type="button" onClick={onClose} title="关闭">
-            ✕
+          <button className="icon-btn" type="button" onClick={onClose} title="关闭" aria-label="关闭">
+            <Icon name="x" size={16} />
           </button>
         </div>
 

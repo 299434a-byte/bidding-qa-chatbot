@@ -1,10 +1,11 @@
 "use client";
 
 import { useRef } from "react";
+import Icon, { type IconName } from "@/components/ui/icons";
 import type { ChatMode } from "@/lib/api";
 
 /**
- * 底部输入区：多行自适应输入框 + 附件（图片）+ 发送按钮，
+ * 底部输入区：多行自适应输入框 + 附件（图片）+ 发送 / 停止按钮，
  * 以及输入框上方的两个简洁控件：联网搜索开关、推理模式三选一。
  *
  * 【为什么单独抽成组件】
@@ -23,11 +24,11 @@ import type { ChatMode } from "@/lib/api";
 /** 允许上传的图片类型（与后端 /analyze-image 的校验保持一致） */
 const IMAGE_ACCEPT = ".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp";
 
-/** 推理模式三选一（与后端 mode 字段取值一致） */
-const MODES: { value: ChatMode; label: string; title: string }[] = [
-  { value: "react", label: "ReAct", title: "单轮 ReAct：工具由模型自主调用（最快）" },
-  { value: "plan", label: "Plan-and-Solve", title: "先拆解子任务再逐步执行，最后综合成答案" },
-  { value: "deep", label: "深度思考", title: "在 Plan-and-Solve 基础上增加自评与必要的修订" },
+/** 推理模式三选一（与后端 mode 字段取值一致）：用图标 + 文案，tooltip 说明差异 */
+const MODES: { value: ChatMode; label: string; title: string; icon: IconName }[] = [
+  { value: "react", label: "ReAct", title: "单轮 ReAct：工具由模型自主调用（最快）", icon: "regenerate" },
+  { value: "plan", label: "Plan-and-Solve", title: "先拆解子任务再逐步执行，最后综合成答案", icon: "chart" },
+  { value: "deep", label: "深度思考", title: "在 Plan-and-Solve 基础上增加自评与必要的修订", icon: "cpu" },
 ];
 
 type Props = {
@@ -36,9 +37,11 @@ type Props = {
   onInputChange: (value: string) => void;
   /** 提交：点击发送或按 Enter 时调用，参数是当前文本 */
   onSend: (text: string) => void;
-  /** 正在生成回答（禁用发送/输入相关按钮） */
+  /** 正在生成回答（发送键变为「停止生成」） */
   busy: boolean;
-  /** 图片正在解析（用于按钮文案「解析中…」） */
+  /** 中断当前生成 */
+  onStop: () => void;
+  /** 图片正在解析（用于停止按钮文案「停止解析」） */
   analyzing: boolean;
   /** 待发送图片的预览（data URL），空表示没选图片 */
   imageUrl: string | null;
@@ -63,6 +66,7 @@ export default function Composer({
   onInputChange,
   onSend,
   busy,
+  onStop,
   analyzing,
   imageUrl,
   imageName,
@@ -96,20 +100,21 @@ export default function Composer({
   return (
     <div className="composer">
       <div className="composer-inner">
-        <div className="chips">
+        <div className="toolrow">
           {/* 联网搜索开关：本地知识库无答案时，Agent 自动联网搜最新公告与法规 */}
           <button
-            className={`chip chip-toggle ${webSearchOn ? "chip-on" : ""}`}
+            className={`chip ${webSearchOn ? "chip-on" : ""}`}
             type="button"
             onClick={onToggleWebSearch}
             disabled={busy || !canWebSearch}
             title={
               canWebSearch
                 ? "开启后，本地知识库查不到时会自动联网搜索最新公告与法规更新"
-                : "后端未配置 TAVILY_API_KEY，联网搜索不可用"
+                : "当前未开启联网搜索能力"
             }
             aria-pressed={webSearchOn}
           >
+            <Icon name="external" size={13} />
             联网搜索 {webSearchOn ? "开" : "关"}
           </button>
           {/* 推理模式三选一：ReAct / Plan-and-Solve / 深度思考 */}
@@ -124,11 +129,13 @@ export default function Composer({
                 title={item.title}
                 aria-pressed={mode === item.value}
               >
+                <Icon name={item.icon} size={13} />
                 {item.label}
               </button>
             ))}
           </div>
         </div>
+
         {/* 已选图片：预览缩略图 + 移除（发送前可随时更换） */}
         {imageUrl && (
           <div className="attach-preview">
@@ -136,11 +143,12 @@ export default function Composer({
             <div className="attach-preview-name" title={imageName ?? undefined}>
               {imageName ?? "已选择图片"}
             </div>
-            <button className="chip" type="button" onClick={onClearImage} disabled={busy}>
-              移除
+            <button className="icon-btn" type="button" onClick={onClearImage} disabled={busy} aria-label="移除图片">
+              <Icon name="x" size={15} />
             </button>
           </div>
         )}
+
         <div className="input-row">
           <input
             ref={fileInputRef}
@@ -150,31 +158,41 @@ export default function Composer({
             onChange={pickImage}
           />
           <button
-            className="attach"
+            className="icon-btn attach-btn"
             type="button"
             title="上传图片（jpg / png / webp），由视觉模型解析内容"
+            aria-label="上传图片"
             onClick={() => fileInputRef.current?.click()}
             disabled={busy}
           >
-            📎
+            <Icon name="image" size={18} />
           </button>
           <textarea
+            className="chat-input"
             ref={textareaRef}
             value={input}
             placeholder="问点什么，例如：最近有哪些市政道路类的招标公告？（也可只上传图片让模型先识别）"
             onChange={(e) => onInputChange(e.target.value)}
             onKeyDown={onKeyDown}
           />
-          <button
-            className="send"
-            onClick={() => onSend(input)}
-            disabled={busy || (!input.trim() && !imageUrl)}
-            type="button"
-          >
-            {busy ? (analyzing ? "解析中…" : "生成中…") : "发送"}
-          </button>
+          {busy ? (
+            <button className="send-btn stop-btn" type="button" onClick={onStop}>
+              <Icon name="stop" size={15} />
+              {analyzing ? "停止解析" : "停止生成"}
+            </button>
+          ) : (
+            <button
+              className="send-btn"
+              type="button"
+              onClick={() => onSend(input)}
+              disabled={!input.trim() && !imageUrl}
+            >
+              <Icon name="send" size={15} />
+              发送
+            </button>
+          )}
         </div>
-        <div className="hint">Enter 发送 · Shift + Enter 换行 · 附件仅支持 jpg / png / webp（≤10MB）</div>
+        <div className="hint">Enter 发送 · Shift + Enter 换行 · 附件支持 jpg / png / webp（≤10MB）</div>
       </div>
     </div>
   );

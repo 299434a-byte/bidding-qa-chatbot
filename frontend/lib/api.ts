@@ -61,6 +61,8 @@ export type Health = {
   agent_configured?: boolean;
   agent_model?: string | null;
   mysql_configured: boolean;
+  /** 建库管道当前实际使用的数据源：mysql（默认）/ postgres（本机副本） */
+  kb_source?: "mysql" | "postgres";
   /** PostgreSQL 查询工具是否可用（连接信息齐备才算配置好） */
   pg_configured?: boolean;
   pg_model?: string | null;
@@ -176,6 +178,20 @@ export type ReflectionInfo = {
   issues: string[];
 };
 
+/**
+ * 引用校验发现的一处问题（后端 citation.py 产出）。
+ * 注意：后端发的是对象而非字符串，旧前端把它当 string 直接渲染会导致
+ * 「Objects are not valid as a React child」崩溃，故显式声明真实结构。
+ */
+export type CitationIssue = {
+  /** 问题类型，如 ref_out_of_range / number_no_source */
+  type?: string;
+  /** 出问题的原始片段（引用编号或数值等，类型不固定） */
+  value?: unknown;
+  /** 给人看的一句话说明 */
+  message?: string;
+};
+
 /** SSE 首个事件：告知当前会话的落库情况 */
 export type ConversationEvent = {
   type: "conversation";
@@ -280,8 +296,9 @@ export type ImageAnalysis = {
 export type ChatEvent =
   | { type: "retrieval"; meta: RetrievalMeta }
   | { type: "sources"; sources: Source[] }
-  /** channel 缺省为 answer（正文）；revision 是改进稿，需单独渲染 */
-  | { type: "delta"; text: string; channel?: "answer" | "revision" }
+  /** channel 缺省为 answer（正文）；revision 是改进稿，需单独渲染。
+   *  reason="citation" 表示这份修订稿来自「引用校验」（与深度模式的修订稿区分）。 */
+  | { type: "delta"; text: string; channel?: "answer" | "revision"; reason?: "citation" }
   | { type: "done"; mode: string }
   | { type: "error"; message: string }
   /** SSE 首个事件：会话落库情况（未登录 / 未开启历史时 saved:false, id:null） */
@@ -326,7 +343,9 @@ export type ChatEvent =
       query: string;
       results: WebSearchResult[];
       error?: string | null;
-    };
+    }
+  /** 引用校验结果：正文生成后体检发现越界引用/无依据数值时发出（ok:false），供前端提示 */
+  | { type: "citation_check"; ok: boolean; issues: (string | CitationIssue)[] };
 
 /** 多轮对话中的一轮，由前端持有并回传给后端（后端无状态） */
 export type ChatTurn = {
@@ -430,7 +449,13 @@ export const api = {
   config: () => req<Record<string, unknown>>("/api/config"),
   schema: () => req<SchemaResponse>("/api/mysql/schema"),
   kbStats: () => req<KbStats>("/api/kb/stats"),
-  startIngest: () => req<{ started: boolean; message: string }>("/api/ingest", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ recreate: true }) }),
+  startIngest: (mode: "full" | "incremental" = "full") =>
+    authReq<{ started: boolean; message: string }>("/api/ingest", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      // 全量：recreate=true（清空重建，行为与改动前一致）；增量：recreate=false（保留旧数据）。
+      body: JSON.stringify({ mode, recreate: mode === "full" }),
+    }),
   ingestStatus: () => req<IngestStatus>("/api/ingest/status"),
 
   // ------------------------------ 账号体系 ------------------------------ //
@@ -503,18 +528,32 @@ export async function analyzeImage(file: File, question?: string): Promise<Image
   form.append("file", file);
   if (question && question.trim()) form.append("question", question.trim());
 
-  const res = await fetch(`${API_BASE}/analyze-image`, { method: "POST", body: form });
-  if (!res.ok) {
-    let detail = `${res.status} ${res.statusText}`;
-    try {
-      const body = await res.json();
-      if (body?.detail) detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail);
-    } catch {
-      /* 忽略解析失败，用状态码兜底 */
-    }
-    throw new Error(detail);
-  }
+  // 图片解析会消耗付费模型额度，后端要求登录；复用 authFetch 自动带上 Bearer 令牌
+  const res = await authFetch("/analyze-image", { method: "POST", body: form });
   return (await res.json()) as ImageAnalysis;
+}
+
+/**
+ * 解析单个 SSE 事件块（已按空行切开）。
+ * 一个事件可能有多行 data:，按规范用「\n」拼接成一份 payload 再做 JSON 解析。
+ * 返回 "[DONE]" 表示流结束；返回 null 表示这一块没有可产出的事件（跳过）。
+ */
+function parseSSEBlock(block: string): ChatEvent | "[DONE]" | null {
+  const dataLines: string[] = [];
+  for (const line of block.split("\n")) {
+    if (!line.startsWith("data:")) continue;
+    // 去掉 "data:" 前缀，并按规范只吃掉一个前导空格（其余空白原样保留）
+    dataLines.push(line.slice(5).replace(/^ /, ""));
+  }
+  if (dataLines.length === 0) return null;
+  const payload = dataLines.join("\n").trim();
+  if (!payload) return null;
+  if (payload === "[DONE]") return "[DONE]";
+  try {
+    return JSON.parse(payload) as ChatEvent;
+  } catch {
+    return null; // 跳过无法解析的分片
+  }
 }
 
 /** 解析后端 SSE 响应，逐条产出事件（/api/chat 与 /api/agent/chat 共用）。 */
@@ -523,28 +562,38 @@ async function* readSSE(res: Response): AsyncGenerator<ChatEvent> {
   const decoder = new TextDecoder("utf-8");
   let buffer = "";
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      // 把 \r\n 统一成 \n，兼容两种换行的后端；stream:true 让多字节字符跨块也能正确解码
+      buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
 
-    // SSE 以空行分隔事件
-    const blocks = buffer.split("\n\n");
-    buffer = blocks.pop() ?? "";
+      // SSE 以空行分隔事件
+      const blocks = buffer.split("\n\n");
+      buffer = blocks.pop() ?? "";
 
-    for (const block of blocks) {
-      for (const line of block.split("\n")) {
-        if (!line.startsWith("data:")) continue;
-        const payload = line.slice(5).trim();
-        if (!payload) continue;
-        if (payload === "[DONE]") return;
-        try {
-          yield JSON.parse(payload) as ChatEvent;
-        } catch {
-          /* 跳过无法解析的分片 */
-        }
+      for (const block of blocks) {
+        const event = parseSSEBlock(block);
+        if (event === "[DONE]") return; // 提前返回也走 finally，统一释放 reader
+        if (event) yield event;
       }
     }
+
+    // 流正常结束：flush 解码器残留，并处理最后一段「没有以空行结尾」的事件
+    buffer += decoder.decode();
+    if (buffer.trim()) {
+      const event = parseSSEBlock(buffer);
+      if (event && event !== "[DONE]") yield event;
+    }
+  } finally {
+    // 无论正常结束 / [DONE] / 抛错 / 被 abort，都取消并释放 reader，避免连接与锁泄漏
+    try {
+      await reader.cancel();
+    } catch {
+      /* 已关闭时 cancel 可能抛错，忽略 */
+    }
+    reader.releaseLock();
   }
 }
 

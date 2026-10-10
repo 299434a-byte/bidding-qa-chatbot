@@ -142,7 +142,7 @@ export default function HistoryPanel({ enabled, user, onOpenConversation, onNewC
 
   // 未开启历史 / 未登录：给出明确提示，不请求数据
   if (!enabled) {
-    return <div className="history-hint">后端未开启对话历史功能（HISTORY_ENABLED=false）。</div>;
+    return <div className="history-hint">历史记录暂未开启，你的提问仍可正常使用，只是不会被保存。</div>;
   }
   if (!user) {
     return <div className="history-hint">登录后可保存并查看历史对话，未登录时问答照常但不会落库。</div>;

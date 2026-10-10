@@ -1,16 +1,13 @@
 "use client";
 
 import Link from "next/link";
+import Icon from "@/components/ui/icons";
+import ThemeToggle from "@/components/ThemeToggle";
 import type { ChatMode } from "@/lib/api";
 
 /**
- * 聊天区顶部的极简标题栏：左侧 logo + 「招投标智能问答」+ 当前推理模式小标签，
- * 右侧一个「控制台」入口跳到后台页 /admin。
- *
- * 【为什么单独抽成组件】
- *   原先这里塞了一整排「知识库 9164 块 / PostgreSQL 已连接 / 图谱已连接 / 检索策略」
- *   大徽标，属于系统状态信息，用户希望它们搬到后台页；主对话页只留最轻的一行标题。
- *   抽成组件后，page.tsx 只需传一个 mode。
+ * 聊天区顶部标题栏：移动端菜单按钮 + 标题 + 当前推理模式标签，
+ * 右侧主题切换与后台控制台入口。sticky + 半透明，内容不会透过顶栏。
  */
 
 /** 推理模式 -> 展示文案 */
@@ -20,17 +17,30 @@ const MODE_LABEL: Record<ChatMode, string> = {
   deep: "深度思考",
 };
 
-export default function ChatHeader({ mode }: { mode: ChatMode }) {
+type Props = {
+  mode: ChatMode;
+  /** 移动端打开左栏抽屉（桌面不显示该按钮） */
+  onOpenRail?: () => void;
+};
+
+export default function ChatHeader({ mode, onOpenRail }: Props) {
   return (
     <header className="topbar">
-      <div className="topbar-title chat-head">
-        <span className="chat-head-logo">📑</span>
+      <div className="topbar-title">
+        {onOpenRail && (
+          <button className="icon-btn only-mobile" type="button" onClick={onOpenRail} aria-label="打开对话列表">
+            <Icon name="menu" size={16} />
+          </button>
+        )}
         招投标智能问答
         <span className="badge badge-blue">{MODE_LABEL[mode]}</span>
       </div>
-      <Link className="chat-head-link" href="/admin">
-        控制台
-      </Link>
+      <div className="topbar-actions">
+        <ThemeToggle />
+        <Link className="icon-btn" href="/admin" title="后台控制台" aria-label="后台控制台">
+          <Icon name="panel" size={16} />
+        </Link>
+      </div>
     </header>
   );
 }

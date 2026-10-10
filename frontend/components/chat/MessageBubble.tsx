@@ -1,9 +1,11 @@
 "use client";
 
-import SourceCard from "@/components/SourceCard";
+import { memo, useMemo, useRef, useState } from "react";
+import Icon from "@/components/ui/icons";
 import ToolTrace from "@/components/chat/ToolTrace";
 import { mdToHtml } from "@/lib/markdown";
 import type {
+  CitationIssue,
   GraphQueryInfo,
   PlanStep,
   PlanStepRun,
@@ -16,123 +18,260 @@ import type {
 } from "@/lib/api";
 
 /**
- * 单条消息气泡：用户消息靠右、助手消息靠左（左右由外层 CSS 的 .msg-user / .msg-assistant 决定）。
+ * 单条消息（Perplexity 式，无气泡）：头像 + 角色名 + 时间 + 正文（最大 800px 居中）。
  *
- * 【为什么单独抽成组件】
- *   它是消息列表里「一条消息」的完整长相，占了原 page.tsx 五百多行。
- *   抽出来后，page.tsx 只负责「有哪些消息、什么时候高亮」，具体怎么渲染由这里负责。
+ * 助手消息的完整结构（自上而下）：
+ *   思考状态条（生成中）→ 正文（行内 [1] 引用胶囊）→ 来源条 → 操作条 → 错误块 / 修订稿 / 工具痕迹
  *
- * 【为什么不在这里存状态】
- *   它是「受控组件」：所有数据来自 props.msg，改动（填回输入框、切换采纳版本）
- *   通过 onFillInput / onAdopt 回调交回给 page.tsx，避免流式回答时的状态被拆散。
+ * 行内引用胶囊的事件用「容器委托」处理（事件挂在 .msg-body 上，不逐按钮绑定）：
+ *   - 点击 data-cite  → 右侧证据面板定位该来源
+ *   - 悬停 data-cite  → 弹出来源摘要卡（表名 + 片段 + 相似度/名次）
+ *   - 点击 .code-copy → 复制对应代码块
  */
 
-/** PostgreSQL 查询工具名（后端 pg.PG_TOOL_NAME，前端据此区分三个工具） */
+/** 查询工具名（与后端一致，用于识别工具徽标文案） */
 const PG_TOOL = "query_bidding_postgres";
-/** Neo4j 图谱查询工具名（后端 graph.GRAPH_TOOL_NAME） */
 const GRAPH_TOOL = "query_bidding_graph";
-/** 联网搜索工具名（后端 web_search.TOOL_NAME） */
 const WEB_TOOL = "search_web_bidding";
 
-/** 子任务状态展示文案 */
 const STEP_STATUS: Record<PlanStepRun["status"], { label: string; cls: string }> = {
   running: { label: "执行中", cls: "badge-blue" },
   done: { label: "已完成", cls: "badge-mint" },
   failed: { label: "失败", cls: "badge-danger" },
 };
 
-type Message = {
+/** 消息级错误：网络中断（可重试）与服务端错误分开提示 */
+export type MsgError = {
+  kind: "network" | "server";
+  /** 人话（如「服务暂时不可用，请稍后重试」） */
+  message: string;
+  /** 原始技术信息，折叠在「技术详情」里 */
+  detail?: string;
+};
+
+export type Message = {
   id: string;
   role: "user" | "assistant";
   content: string;
-  /** 用户消息附带的图片（data URL，用于缩略图展示） */
+  /** 消息产生时间（展示 HH:mm；历史恢复时来自后端 created_at） */
+  ts?: number | null;
+  /** 用户消息附带的图片（data URL） */
   image?: { url: string; name: string };
-  /** 图片解析中（后端 /analyze-image 尚未返回） */
   analyzing?: boolean;
-  /** 图片识别结果（后端 /analyze-image 返回） */
   imageResult?: { text: string; model: string | null };
   sources?: Source[];
   meta?: RetrievalMeta;
-  /** Agent 的工具调用记录（未调用则为空） */
   toolCalls?: (ToolCallInfo & { count?: number })[];
-  /** Agent 调用 PostgreSQL 工具后返回的 SQL 与结果 */
   sqlQueries?: SqlQueryInfo[];
-  /** Agent 调用 Neo4j 图谱工具后返回的 Cypher 与结果 */
   graphQueries?: GraphQueryInfo[];
-  /** Agent 调用联网搜索工具后返回的结果（含相关性评分） */
   webSearches?: WebSearchInfo[];
-  /** Plan-and-Solve / 深度模式：规划出的子任务 */
   plan?: PlanStep[];
-  /** 规划失败已回退为 ReAct 单轮 */
   planFallback?: boolean;
-  /** 各子任务的执行状态与观察结果 */
   steps?: PlanStepRun[];
-  /** 深度模式的自评结果 */
   reflections?: ReflectionInfo[];
-  /** 改进稿正文（channel=revision 的 delta，单独渲染） */
   revision?: string;
-  /** 用户采纳的版本：v1=原回答正文，v2=改进稿（默认 v1，决定下一轮回传哪份） */
+  citationIssues?: (string | CitationIssue)[];
+  revisionByCitation?: boolean;
   adoptedVersion?: "v1" | "v2";
   mode?: string;
-  error?: string;
   streaming?: boolean;
+  /** 用户手动停止：内容已保留，给「继续生成」入口 */
+  aborted?: boolean;
+  /** 结构化的错误信息（区分网络 / 服务端） */
+  error?: MsgError | null;
 };
-
-export type { Message };
 
 type Props = {
-  /** 要渲染的这一条消息 */
   msg: Message;
-  /** 是否高亮（从历史检索结果跳转过来时的短暂高亮） */
   highlighted?: boolean;
-  /** 正在回答时为 true（用于禁用「填入提问框」等按钮） */
   busy?: boolean;
-  /** 把图片识别结果填回提问输入框 */
   onFillInput: (text: string) => void;
-  /** 切换该条回复采纳的版本（v1 原回答 / v2 修订稿） */
   onAdopt: (id: string, version: "v1" | "v2") => void;
+  onOpenEvidence?: (sourceIndex?: number) => void;
+  onRegenerate?: (id: string) => void;
+  onToast: (text: string, kind?: "success" | "error" | "info") => void;
 };
 
-export default function MessageBubble({ msg, highlighted, busy, onFillInput, onAdopt }: Props) {
+/** 取来源标题：优先标题类字段，其次首个文本字段 */
+function pickTitle(source: Source): string {
+  const entries = Object.entries(source.fields ?? {});
+  const preferred = entries.find(
+    ([key, value]) => /title|name|subject|标题|名称|项目名/i.test(key) && typeof value === "string" && value.trim(),
+  );
+  if (preferred) return String(preferred[1]);
+  const firstText = entries.find(([, value]) => typeof value === "string" && value.trim());
+  if (firstText) return String(firstText[1]);
+  return `记录 ${source.primary_key ?? "—"}`;
+}
+
+/** 思考状态条文案：随事件推进 */
+function stageText(msg: Message): string {
+  if (!msg.streaming) return "";
+  if (msg.aborted) return "已停止生成，内容已保留";
+  if (msg.steps && msg.steps.some((s) => s.status === "running")) return "正在按计划逐步执行…";
+  const pendingTool = (msg.toolCalls ?? []).some((c) => typeof c.count !== "number");
+  if (pendingTool) return "正在检索资料…";
+  if (msg.meta) {
+    const tail = msg.meta.rerank_applied ? "已完成重排" : "正在整理答案…";
+    return `已检索到 ${msg.meta.final_count} 条来源 · ${tail}`;
+  }
+  if (msg.content) return "正在生成回答…";
+  return "正在分析问题…";
+}
+
+/** 工具调用徽标的人话文案 */
+function toolLabel(name: string): string {
+  if (name === WEB_TOOL) return "已调用联网搜索";
+  if (name === GRAPH_TOOL) return "已调用关系查询";
+  if (name === PG_TOOL) return "已调用统计查询";
+  return "已调用知识库检索";
+}
+
+function fmtTime(ts?: number | null): string {
+  if (!ts) return "";
+  const d = new Date(ts);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+function MessageBubble({ msg, highlighted, busy, onFillInput, onAdopt, onOpenEvidence, onRegenerate, onToast }: Props) {
+  // Markdown 只在 content / 来源条数变化时重解析（流式增量由 page.tsx 的 50ms 节流控制频率）
+  const citeMax = msg.sources?.length ?? 0;
+  const contentHtml = useMemo(
+    () => (msg.content ? mdToHtml(msg.content, { citeMax }) : ""),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [msg.content, citeMax],
+  );
+  const revisionHtml = useMemo(() => (msg.revision ? mdToHtml(msg.revision, { citeMax }) : ""), [msg.revision, citeMax]);
+
+  const bodyRef = useRef<HTMLDivElement>(null);
+  /** 悬停中的引用信息（编号 + 相对 .msg-body 的定位） */
+  const [citeHover, setCiteHover] = useState<{ n: number; top: number; left: number } | null>(null);
+
+  const isAssistant = msg.role === "assistant";
+  const showingRevision = msg.revision && (msg.adoptedVersion ?? "v1") === "v2";
+
+  /** 复制内容（纯文本 / Markdown 带来源清单） */
+  const copyContent = (asMarkdown: boolean) => {
+    let text = msg.content;
+    if (asMarkdown && msg.sources && msg.sources.length > 0) {
+      const list = msg.sources
+        .map((s, i) => `${i + 1}. ${pickTitle(s)}（${s.label ?? "来源"}）`)
+        .join("\n");
+      text = `${msg.content}\n\n**参考来源**\n\n${list}\n`;
+    }
+    navigator.clipboard
+      .writeText(text)
+      .then(() => onToast(asMarkdown ? "已复制为 Markdown" : "已复制到剪贴板", "success"))
+      .catch(() => onToast("复制失败，请手动选择内容复制", "error"));
+  };
+
+  /** 容器事件委托：引用点击 / 代码块复制按钮 */
+  const onBodyClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    const target = e.target as HTMLElement;
+    const cite = target.closest<HTMLElement>("[data-cite]");
+    if (cite) {
+      onOpenEvidence?.(Number(cite.dataset.cite) - 1);
+      return;
+    }
+    const copyBtn = target.closest<HTMLElement>(".code-copy");
+    if (copyBtn) {
+      const block = copyBtn.closest(".code-block");
+      const code = block?.querySelector("pre code")?.textContent ?? "";
+      navigator.clipboard
+        .writeText(code)
+        .then(() => {
+          copyBtn.classList.add("is-copied");
+          copyBtn.textContent = "已复制";
+          window.setTimeout(() => {
+            copyBtn.classList.remove("is-copied");
+            copyBtn.textContent = "复制";
+          }, 1500);
+        })
+        .catch(() => onToast("复制失败，请手动选择代码", "error"));
+    }
+  };
+
+  /** 引用悬停弹层：计算相对位置（Canvas 由 .msg-body 的 position:relative 提供） */
+  const onBodyMouseOver = (e: React.MouseEvent<HTMLDivElement>) => {
+    const cite = (e.target as HTMLElement).closest<HTMLElement>("[data-cite]");
+    const body = bodyRef.current;
+    if (!cite || !body) {
+      setCiteHover(null);
+      return;
+    }
+    const n = Number(cite.dataset.cite);
+    const bodyRect = body.getBoundingClientRect();
+    const citeRect = cite.getBoundingClientRect();
+    const top = citeRect.bottom - bodyRect.top + 6;
+    const left = Math.min(Math.max(citeRect.left - bodyRect.left, 0), bodyRect.width - 220);
+    setCiteHover({ n, top, left });
+  };
+
+  const hoveredSource = citeHover ? (msg.sources ?? [])[citeHover.n - 1] : undefined;
+
   return (
-    <div
-      className={`msg msg-${msg.role}${highlighted ? " msg-highlight" : ""}`}
-      id={`msg-${msg.id}`}
-    >
-      <div className="msg-avatar">{msg.role === "user" ? "我" : "AI"}</div>
-      <div className="msg-body">
+    <div className={`msg msg-${msg.role}${highlighted ? " msg-highlight" : ""}`} id={`msg-${msg.id}`}>
+      <div className="msg-avatar" aria-hidden="true">
+        {msg.role === "user" ? "你" : <Icon name="message" size={15} />}
+      </div>
+      <div
+        className="msg-body"
+        ref={bodyRef}
+        onClick={onBodyClick}
+        onMouseOver={onBodyMouseOver}
+        onMouseLeave={() => setCiteHover(null)}
+      >
+        <div className="msg-head">
+          <span className="msg-name">{msg.role === "user" ? "你" : "机器人"}</span>
+          <span className="msg-time">{fmtTime(msg.ts)}</span>
+          {msg.mode && !msg.streaming && <span className="badge badge-plain">{msg.mode}</span>}
+        </div>
+
         {msg.role === "user" ? (
           <>
             {msg.image && <img className="msg-image" src={msg.image.url} alt={msg.image.name} />}
-            {msg.content}
+            <div className="msg-text">{msg.content}</div>
+            <div className="msg-actions">
+              <button
+                className="act-btn"
+                type="button"
+                onClick={() =>
+                  navigator.clipboard
+                    .writeText(msg.content)
+                    .then(() => onToast("已复制到剪贴板", "success"))
+                    // 剪贴板权限可能被浏览器策略拒绝（如非 HTTPS / 未授权），必须兜底
+                    .catch(() => onToast("复制失败，请手动选择内容复制", "error"))
+                }
+              >
+                <Icon name="copy" size={14} />
+                复制
+              </button>
+            </div>
           </>
         ) : (
           <>
-            {/* 图片解析中：先给出明确状态，避免看起来卡住 */}
-            {msg.analyzing && (
-              <div style={{ marginBottom: 8 }}>
-                <span className="badge badge-blue">
-                  <span className="spinner" />
-                  图片解析中…
-                </span>
+            {/* 思考状态条（生成中不空白等待；aria-live 供读屏感知阶段变化） */}
+            {(msg.streaming || msg.aborted) && (
+              <div className="think-strip" role="status" aria-live="polite" data-testid="streaming">
+                {!msg.aborted && <span className="think-spinner" aria-hidden="true" />}
+                <span className="think-text">{stageText(msg)}</span>
               </div>
             )}
 
-            {/* 图片识别结果：展示在回答区上方，可一键填回提问框继续追问 */}
+            {/* 图片解析 / 识别结果 */}
+            {msg.analyzing && (
+              <div className="think-strip">
+                <span className="think-spinner" aria-hidden="true" />
+                <span className="think-text">正在识别图片内容…</span>
+              </div>
+            )}
             {msg.imageResult && (
               <div className="vision-card">
                 <div className="vision-card-head">
                   <span className="badge badge-mint">图片识别结果</span>
-                  {msg.imageResult.model && (
-                    <span className="badge badge-plain">{msg.imageResult.model}</span>
-                  )}
-                  <span className="source-spacer" />
-                  <button
-                    className="chip"
-                    type="button"
-                    onClick={() => onFillInput(msg.imageResult!.text)}
-                    disabled={busy}
-                  >
+                  {msg.imageResult.model && <span className="badge badge-plain">{msg.imageResult.model}</span>}
+                  <button className="chip" type="button" onClick={() => onFillInput(msg.imageResult!.text)} disabled={busy}>
                     将识别结果填入提问框
                   </button>
                 </div>
@@ -140,86 +279,195 @@ export default function MessageBubble({ msg, highlighted, busy, onFillInput, onA
               </div>
             )}
 
-            {(msg.meta || (msg.toolCalls?.length ?? 0) > 0) && (
-              <div style={{ marginBottom: 8, display: "flex", gap: 6, flexWrap: "wrap" }}>
-                {msg.toolCalls && msg.toolCalls.length > 0 ? (
-                  msg.toolCalls.map((call, index) => {
-                    const isPg = call.name === PG_TOOL;
-                    const isGraph = call.name === GRAPH_TOOL;
-                    const isWeb = call.name === WEB_TOOL;
-                    const label = isWeb
-                      ? "已调用联网搜索"
-                      : isGraph
-                        ? "已调用知识图谱查询"
-                        : isPg
-                          ? "已调用 PostgreSQL 查询"
-                          : "已调用知识库检索";
-                    return (
-                      <span
-                        className="badge badge-blue"
-                        key={`${call.name}-${index}`}
-                        title={
-                          isWeb
-                            ? `联网搜索关键词：${call.query ?? ""}`
-                            : isGraph
-                              ? `生成的 Cypher：${call.query ?? ""}`
-                              : isPg
-                                ? `PostgreSQL 查询：${call.query ?? ""}`
-                                : call.query
-                                  ? `Agent 检索词：${call.query}`
-                                  : undefined
-                        }
-                      >
-                        {label}
-                        {typeof call.count === "number" ? ` · 命中 ${call.count} 条` : ""}
-                      </span>
-                    );
-                  })
-                ) : (
-                  <span className="badge badge-plain">未调用工具</span>
+            {/* 首 token 前：骨架行占位（内容来了就消失） */}
+            {msg.streaming && !msg.content && !msg.aborted && (
+              <div aria-hidden="true">
+                <div className="skeleton skel-line" />
+                <div className="skeleton skel-line" />
+                <div className="skeleton skel-line short" />
+              </div>
+            )}
+
+            {/* 采纳修订版标记 */}
+            {showingRevision && msg.revisionByCitation && (
+              <div className="adopted-tag">
+                <span className="badge badge-warn">已采纳引用校验修订稿</span>
+              </div>
+            )}
+            {showingRevision && !msg.revisionByCitation && (
+              <div className="adopted-tag">
+                <span className="badge badge-warn">已采纳修订稿</span>
+              </div>
+            )}
+
+            {/* 正文（流式期间挂 aria-live=polite——读屏可感知生成进展，且 50ms 节流避免了逐 token 播报） */}
+            {msg.content && (
+              <div
+                className="answer"
+                data-testid="answer"
+                aria-live={msg.streaming ? "polite" : undefined}
+                aria-busy={msg.streaming || undefined}
+                dangerouslySetInnerHTML={{ __html: contentHtml }}
+              />
+            )}
+            {msg.streaming && msg.content && <span className="cursor" aria-hidden="true" />}
+
+            {/* 引用 hover 弹层 */}
+            {citeHover && hoveredSource && (
+              <div className="cite-pop" style={{ top: citeHover.top, left: citeHover.left }} role="tooltip">
+                <div className="cite-pop-title">
+                  <span className="src-n">{citeHover.n}</span>
+                  {hoveredSource.label ?? "来源"}
+                </div>
+                <div className="cite-pop-snippet">{hoveredSource.text}</div>
+                <div className="cite-pop-footer">
+                  {typeof hoveredSource.rerank_rank === "number" && <span>重排 #{hoveredSource.rerank_rank}</span>}
+                  {hoveredSource.scores.dense !== undefined && <span>相似度 {hoveredSource.scores.dense.toFixed(3)}</span>}
+                  <span>点击定位原文</span>
+                </div>
+              </div>
+            )}
+
+            {/* 错误块：人话 + 重试 + 可折叠技术详情（不清空已输出内容） */}
+            {msg.error && (
+              <div className="err-block">
+                <div className="err-title">
+                  <Icon name="alert" size={16} />
+                  {msg.error.kind === "network" ? "网络中断" : "服务出错了"}
+                </div>
+                <div className="err-msg">{msg.error.message}</div>
+                <div className="err-actions">
+                  {(onRegenerate || msg.aborted) && (
+                    <button className="btn btn-primary" type="button" onClick={() => onRegenerate?.(msg.id)}>
+                      {msg.aborted ? "继续生成" : "重试"}
+                    </button>
+                  )}
+                </div>
+                {msg.error.detail && (
+                  <details className="err-detail">
+                    <summary>技术详情</summary>
+                    <pre>{msg.error.detail}</pre>
+                  </details>
                 )}
-                {/* 检索统计只有走了知识库检索才有 */}
-                {msg.meta && (
-                  <>
-                    <span className="badge badge-plain">向量召回 {msg.meta.dense_count}</span>
-                    <span className="badge badge-plain">
-                      BM25 召回 {msg.meta.bm25_ready ? msg.meta.sparse_count : "未启用"}
+              </div>
+            )}
+
+            {/* 引用校验问题提示（保留 revision 语义） */}
+            {msg.citationIssues && msg.citationIssues.length > 0 && (
+              <div className="notice notice-warn">
+                引用校验发现 {msg.citationIssues.length} 处问题
+                {msg.revision && "，已生成修订稿（见下方切换）"}
+                <ul className="reflect-issues">
+                  {msg.citationIssues.map((issue, i) => (
+                    // 后端 issue 是 {type, value, message} 对象，取 message 展示；兼容字符串/缺字段
+                    <li key={i}>{typeof issue === "string" ? issue : issue.message ?? "引用校验发现问题"}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {/* 修订稿：标签 + v1/v2 对比切换（引用校验与深度反思共用此卡片） */}
+            {msg.revision && (
+              <div className="revision-card">
+                <details open>
+                  <summary className="revision-head">
+                    <span className="badge badge-warn">{msg.revisionByCitation ? "引用校验修订稿" : "修订稿"}</span>
+                    <span className="mono-num">v1 原回答 / v2 修订稿 可切换</span>
+                  </summary>
+                  <div className="revision-toggle" role="group" aria-label="采纳版本">
+                    <button
+                      className={`seg-item ${(msg.adoptedVersion ?? "v1") === "v1" ? "seg-active" : ""}`}
+                      type="button"
+                      aria-pressed={(msg.adoptedVersion ?? "v1") === "v1"}
+                      onClick={() => onAdopt(msg.id, "v1")}
+                    >
+                      原回答 v1
+                    </button>
+                    <button
+                      className={`seg-item ${(msg.adoptedVersion ?? "v1") === "v2" ? "seg-active" : ""}`}
+                      type="button"
+                      aria-pressed={(msg.adoptedVersion ?? "v1") === "v2"}
+                      onClick={() => onAdopt(msg.id, "v2")}
+                    >
+                      修订稿 v2
+                    </button>
+                  </div>
+                  <div className="revision-hint current">
+                    下一轮对话将回传所选版本：当前采纳「{(msg.adoptedVersion ?? "v1") === "v2" ? "修订稿 v2" : "原回答 v1"}」。
+                  </div>
+                  <div className="revision-body answer" dangerouslySetInnerHTML={{ __html: revisionHtml }} />
+                </details>
+              </div>
+            )}
+
+            {/* 来源条（Perplexity 式编号卡）：点击在证据面板定位 */}
+            {msg.sources && msg.sources.length > 0 && (
+              <div className="sources-title" id={`sources-${msg.id}`}>
+                <Icon name="file-text" size={13} />
+                参考来源 · {msg.sources.length} 条
+                <span className="badge badge-plain">点击在右侧核对原文</span>
+              </div>
+            )}
+            {msg.sources && msg.sources.length > 0 && (
+              <div className="src-strip">
+                {msg.sources.map((source, index) => (
+                  <button
+                    className="src-chip"
+                    type="button"
+                    key={`${source.doc_id}-${index}`}
+                    data-testid="src-chip"
+                    onClick={() => onOpenEvidence?.(index)}
+                  >
+                    <span className="src-chip-head">
+                      <span className="src-n">{index + 1}</span>
+                      <span className="src-kind">{source.label}</span>
                     </span>
-                    <span className="badge badge-plain">最终参考 {msg.meta.final_count}</span>
-                    {msg.meta.rerank_applied ? (
-                      <span className="badge badge-mint">
-                        重排已生效（{msg.meta.rerank_candidates} → {msg.meta.final_count}）
-                      </span>
-                    ) : (
-                      <span className="badge badge-plain">未重排</span>
-                    )}
-                    {msg.meta.rerank_error && (
-                      <span className="badge badge-danger" title={msg.meta.rerank_error}>
-                        重排失败
-                      </span>
-                    )}
-                  </>
-                )}
-                {msg.mode && <span className="badge badge-plain">mode: {msg.mode}</span>}
+                    <span className="src-title">{pickTitle(source)}</span>
+                    <span className="src-meta">
+                      {typeof source.rerank_rank === "number" && <>重排 #{source.rerank_rank}</>}
+                      {/* 分隔符只在「前后两段都有内容」时出现，避免悬空的「 · 」 */}
+                      {typeof source.rerank_rank === "number" &&
+                        source.matched_by.includes("dense") &&
+                        source.scores.dense !== undefined &&
+                        <> · </>}
+                      {source.matched_by.includes("dense") && source.scores.dense !== undefined && <>相似度 {source.scores.dense.toFixed(2)}</>}
+                    </span>
+                  </button>
+                ))}
               </div>
             )}
 
-            {/* Agent 判定无需检索时不会产生检索元数据，这里单独说明它的决定 */}
-            {!msg.meta && (msg.toolCalls?.length ?? 0) === 0 && msg.mode === "agent_direct" && (
-              <div style={{ marginBottom: 8, display: "flex", gap: 6, flexWrap: "wrap" }}>
-                <span className="badge badge-plain">未调用工具 · Agent 直接回答</span>
-              </div>
-            )}
+            {/* 操作条：复制 / 复制为 Markdown / 重新生成（中断后是继续生成）/ 引用定位 */}
+            <div className="msg-actions">
+              <button className="act-btn" type="button" onClick={() => copyContent(false)}>
+                <Icon name="copy" size={14} />
+                复制
+              </button>
+              <button className="act-btn" type="button" onClick={() => copyContent(true)} disabled={!msg.content}>
+                <Icon name="file-text" size={14} />
+                复制为 Markdown
+              </button>
+              {onRegenerate && (
+                <button className="act-btn" type="button" onClick={() => onRegenerate(msg.id)} disabled={busy && !msg.aborted}>
+                  <Icon name="regenerate" size={14} />
+                  {msg.aborted ? "继续生成" : "重新生成"}
+                </button>
+              )}
+              {msg.sources && msg.sources.length > 0 && onOpenEvidence && (
+                <button className="act-btn act-primary" type="button" onClick={() => onOpenEvidence()}>
+                  <Icon name="locate" size={14} />
+                  引用定位
+                </button>
+              )}
+            </div>
 
-            {msg.error && <div className="notice notice-danger">{msg.error}</div>}
-
-            {/* Plan-and-Solve / 深度模式：规划出的子任务 */}
+            {/* 规划 / 步骤 / 反思：保留原有语义，样式对齐 token */}
             {msg.plan && msg.plan.length > 0 && (
               <div className="plan-card">
                 <div className="plan-card-head">
                   <span className="badge badge-blue">规划</span>
                   <span className="badge badge-plain">{msg.plan.length} 个子任务</span>
-                  {msg.planFallback && <span className="badge badge-warn">已回退为 ReAct 单轮</span>}
+                  {msg.planFallback && <span className="badge badge-warn">已回退为单轮模式</span>}
                 </div>
                 <ol className="plan-list">
                   {msg.plan.map((step) => (
@@ -234,7 +482,6 @@ export default function MessageBubble({ msg, highlighted, busy, onFillInput, onA
               </div>
             )}
 
-            {/* Plan-and-Solve / 深度模式：各子任务的执行状态与观察结果 */}
             {msg.steps && msg.steps.length > 0 && (
               <div className="plan-card">
                 <div className="plan-card-head">
@@ -247,23 +494,18 @@ export default function MessageBubble({ msg, highlighted, busy, onFillInput, onA
                     <details className="step-item" key={step.index} open={step.status === "running"}>
                       <summary>
                         <span className={`badge ${status.cls}`}>{status.label}</span>
-                        <span className="step-title">
+                        <span>
                           {step.index}. {step.title || "（无标题）"}
                         </span>
                       </summary>
                       {step.observation && <div className="step-observation">{step.observation}</div>}
-                      {step.error && (
-                        <div className="notice notice-danger" style={{ marginTop: 8 }}>
-                          {step.error}
-                        </div>
-                      )}
+                      {step.error && <div className="notice notice-danger">{step.error}</div>}
                     </details>
                   );
                 })}
               </div>
             )}
 
-            {/* 深度模式：自评判定与改进建议 */}
             {msg.reflections && msg.reflections.length > 0 && (
               <div className="reflect-card">
                 <div className="plan-card-head">
@@ -275,7 +517,7 @@ export default function MessageBubble({ msg, highlighted, busy, onFillInput, onA
                     <span className={`badge ${reflection.verdict === "ok" ? "badge-mint" : "badge-warn"}`}>
                       {reflection.verdict === "ok" ? "自评通过" : "建议修订"}
                     </span>
-                    <span className="reflect-round">第 {reflection.round} 轮</span>
+                    <span className="mono-num">第 {reflection.round} 轮</span>
                     {reflection.issues.length > 0 && (
                       <ul className="reflect-issues">
                         {reflection.issues.map((issue, i) => (
@@ -288,64 +530,14 @@ export default function MessageBubble({ msg, highlighted, busy, onFillInput, onA
               </div>
             )}
 
-            {msg.content && (
-              <div className="answer" dangerouslySetInnerHTML={{ __html: mdToHtml(msg.content) }} />
-            )}
-            {msg.streaming && !msg.content && <span className="cursor" />}
-            {msg.streaming && msg.content && <span className="cursor" />}
-
-            {/* 改进稿：单独折叠展示，可切换下一轮采纳哪份 */}
-            {msg.revision && (
-              <details className="revision-card" open>
-                <summary className="revision-summary">
-                  <span className="badge badge-warn">修订后的回答</span>
-                  <span className="source-metrics">v1 / v2 可切换</span>
-                </summary>
-                <div className="revision-toggle">
-                  <button
-                    className={`seg-item ${(msg.adoptedVersion ?? "v1") === "v1" ? "seg-active" : ""}`}
-                    type="button"
-                    onClick={() => onAdopt(msg.id, "v1")}
-                  >
-                    原回答 v1
-                  </button>
-                  <button
-                    className={`seg-item ${(msg.adoptedVersion ?? "v1") === "v2" ? "seg-active" : ""}`}
-                    type="button"
-                    onClick={() => onAdopt(msg.id, "v2")}
-                  >
-                    修订稿 v2
-                  </button>
-                </div>
-                <div className="revision-hint">
-                  下一轮对话将回传所选版本：当前采纳「
-                  {(msg.adoptedVersion ?? "v1") === "v2" ? "修订稿 v2" : "原回答 v1"}」。
-                </div>
-                <div className="answer" dangerouslySetInnerHTML={{ __html: mdToHtml(msg.revision) }} />
-              </details>
-            )}
-
-            {/* 工具调用痕迹：PostgreSQL / Neo4j / 联网搜索 三类可折叠结果 */}
-            <ToolTrace
-              sqlQueries={msg.sqlQueries}
-              graphQueries={msg.graphQueries}
-              webSearches={msg.webSearches}
-            />
-
-            {msg.sources && msg.sources.length > 0 && (
-              <div className="sources">
-                <div className="sources-title">
-                  参考来源 · {msg.sources.length} 条
-                  <span className="badge badge-plain">点击展开原文</span>
-                </div>
-                {msg.sources.map((source, index) => (
-                  <SourceCard key={`${source.doc_id}-${index}`} source={source} index={index} />
-                ))}
-              </div>
-            )}
+            {/* 工具调用痕迹（SQL / Cypher / 联网搜索结果，可折叠） */}
+            <ToolTrace sqlQueries={msg.sqlQueries} graphQueries={msg.graphQueries} webSearches={msg.webSearches} />
           </>
         )}
       </div>
     </div>
   );
 }
+
+// React.memo + props 浅比较：流式期间只有「正在增长的那条」因 msg 引用变化而重渲染
+export default memo(MessageBubble);
