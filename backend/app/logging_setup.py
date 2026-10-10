@@ -30,6 +30,8 @@ from __future__ import annotations
 
 # logging：Python 标准库的日志工具。
 import logging
+# logging.handlers：标准库的扩展处理器；这里用其中的 TimedRotatingFileHandler 做日志轮转。
+from logging.handlers import TimedRotatingFileHandler
 # threading：锁，保证「只配置一次」，避免并发启动时重复添加处理器。
 import threading
 
@@ -92,12 +94,20 @@ def setup_logging(settings: Settings | None = None) -> None:
             console.setLevel(level)
             logger.addHandler(console)
 
-            # ② 文件处理器：日志追加写入本地文件。
+            # ② 文件处理器：按天轮转地追加写入本地文件。
+            # 【为什么必须轮转】常驻运行必须轮转，否则 data/app.log 会无限增长，
+            #   服务器跑几个月就能把磁盘写满。TimedRotatingFileHandler 在每天午夜
+            #   把当前日志改名成 app.log.2026-10-11 这样的历史文件，只保留最近 7 份
+            #   （backupCount=7），旧的自动删；轮转后的文件同样用 utf-8，中文不乱码。
             try:
                 # 确保日志文件所在目录存在（例如 backend/data/）。
                 s.log_file_path.parent.mkdir(parents=True, exist_ok=True)
-                # encoding="utf-8"：保证中文日志不乱码。
-                file_handler = logging.FileHandler(s.log_file_path, encoding="utf-8")
+                file_handler = TimedRotatingFileHandler(
+                    s.log_file_path,
+                    when="midnight",
+                    backupCount=7,
+                    encoding="utf-8",
+                )
                 file_handler.setFormatter(formatter)
                 file_handler.setLevel(level)
                 logger.addHandler(file_handler)

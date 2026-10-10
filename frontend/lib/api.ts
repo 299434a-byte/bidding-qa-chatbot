@@ -4,7 +4,10 @@
  * 而 /api/chat 需要 POST 传问题正文）。
  */
 
-export const API_BASE = (process.env.NEXT_PUBLIC_API_BASE || "http://127.0.0.1:8000").replace(/\/+$/, "");
+// 回落规则：只有「完全没设置过」才用本地开发默认值；显式留空（=""）表示同源部署，
+// 请求走相对路径 /api/*，由 Nginx 反代转给后端（|| 会把空串也当成假值，做不到这一点）。
+const raw = process.env.NEXT_PUBLIC_API_BASE;
+export const API_BASE = (raw === undefined ? "http://127.0.0.1:8000" : raw).replace(/\/+$/, "");
 
 export type ColumnInfo = {
   name: string;
@@ -476,8 +479,8 @@ export const api = {
       body: JSON.stringify({ mode, recreate: mode === "full" }),
     }),
   ingestStatus: () => req<IngestStatus>("/api/ingest/status"),
-  /** 问答可观测性指标（耗时 / 缓存命中率 / 重排成功率与失败计数） */
-  metrics: () => req<MetricsSummary>("/api/metrics"),
+  /** 问答可观测性指标（耗时 / 缓存命中率 / 重排成功率与失败计数）；接口已需登录，带令牌请求 */
+  metrics: () => authReq<MetricsSummary>("/api/metrics"),
 
   // ------------------------------ 账号体系 ------------------------------ //
   /** 注册并直接拿到令牌 */

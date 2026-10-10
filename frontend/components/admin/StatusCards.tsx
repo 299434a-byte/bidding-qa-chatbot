@@ -27,6 +27,8 @@ type Props = {
   schema: SchemaResponse | null;
   /** 问答指标（/api/metrics）；拉取失败或还没拉时为 null，重排成功率卡显示「—」 */
   metrics?: MetricsSummary | null;
+  /** 指标接口返回 401（未登录）：重排成功率卡显示「需登录后查看」 */
+  metricsLocked?: boolean;
 };
 
 /** 空值统一成 `—` */
@@ -42,7 +44,7 @@ function fmtCount(value: number | undefined, unit: string): string {
   return `${value.toLocaleString("zh-CN")} ${unit}`;
 }
 
-export default function StatusCards({ health, kb, schema, metrics }: Props) {
+export default function StatusCards({ health, kb, schema, metrics, metricsLocked }: Props) {
   const points = kb?.points ?? 0;
   const dim = kb?.vector_dim ?? 0;
   const pgSource = health?.kb_source === "postgres";
@@ -77,9 +79,13 @@ export default function StatusCards({ health, kb, schema, metrics }: Props) {
         {
           name: "重排成功率",
           icon: "chart",
-          value: rerankTried > 0 ? `${Math.round(rerankRate * 100)}%` : "—",
-          desc: rerankTried > 0 ? `成功 ${rerankApplied} 次 · 失败降级 ${rerankFailed} 次` : "尚无重排记录",
-          tone: rerankTried === 0 ? "off" : rerankRate >= 0.5 ? "ok" : "err",
+          value: metricsLocked ? "需登录后查看" : rerankTried > 0 ? `${Math.round(rerankRate * 100)}%` : "—",
+          desc: metricsLocked
+            ? "指标接口已收进门禁，登录后展示"
+            : rerankTried > 0
+              ? `成功 ${rerankApplied} 次 · 失败降级 ${rerankFailed} 次`
+              : "尚无重排记录",
+          tone: metricsLocked ? "off" : rerankTried === 0 ? "off" : rerankRate >= 0.5 ? "ok" : "err",
         },
         {
           name: "向量模型",

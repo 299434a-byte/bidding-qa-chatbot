@@ -43,6 +43,8 @@ export default function AdminPage() {
   const [schema, setSchema] = useState<SchemaResponse | null>(null);
   /** 问答指标（含重排成功率），供「重排成功率」状态卡展示 */
   const [metrics, setMetrics] = useState<MetricsSummary | null>(null);
+  /** 指标接口返回 401（未登录）时为 true：状态卡显示「需登录后查看」 */
+  const [metricsLocked, setMetricsLocked] = useState(false);
   const [ingest, setIngest] = useState<IngestStatus | null>(null);
   const [loading, setLoading] = useState(false);
   /** 首次加载是否已完成（用于骨架屏） */
@@ -59,16 +61,23 @@ export default function AdminPage() {
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const [h, k, s, m] = await Promise.all([
+      const [h, k, s] = await Promise.all([
         api.health(),
         api.kbStats(),
         api.schema(),
-        api.metrics(),
       ]);
       setHealth(h);
       setKb(k);
       setSchema(s);
-      setMetrics(m);
+      // /api/metrics 已需登录（部署加固）：401 只锁指标卡，不让整个状态区跟着报错
+      try {
+        setMetrics(await api.metrics());
+        setMetricsLocked(false);
+      } catch (e) {
+        setMetrics(null);
+        const detail = e instanceof Error ? e.message : String(e);
+        setMetricsLocked(detail.includes("401") || detail.includes("未登录"));
+      }
       setError(null);
       setLastUpdated(clockText());
     } catch (e) {
@@ -103,6 +112,7 @@ export default function AdminPage() {
   }, [pushToast]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- 挂载后各拉取一次初始状态，setState 都在异步回调里完成，非渲染期同步更新
     void refresh();
     void (async () => {
       try {
@@ -207,7 +217,7 @@ export default function AdminPage() {
         <div className="admin-card admin-span-all">
           <div className="admin-card-title">系统状态</div>
           {loadedOnce ? (
-            <StatusCards health={health} kb={kb} schema={schema} metrics={metrics} />
+            <StatusCards health={health} kb={kb} schema={schema} metrics={metrics} metricsLocked={metricsLocked} />
           ) : (
             <div className="stat-grid">
               {[0, 1, 2, 3, 4, 5].map((i) => (

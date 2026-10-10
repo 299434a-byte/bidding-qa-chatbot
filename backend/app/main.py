@@ -181,6 +181,8 @@ from pydantic import BaseModel, Field
 # 【auth】账号与令牌；【history as history_store】对话历史存取。
 # 起别名 history_store 是为了避免与接口里表示「最近几轮对话」的变量 history 混淆。
 from . import auth, history as history_store
+# ratelimit：应用层限流（内存令牌桶），给问答类接口套 429 门禁。
+from . import ratelimit
 # 【Agent 模块】MODES 是允许的三种模式（react/plan/deep）；
 # TOOL_NAME 是知识库检索工具的名字（用于 /api/config 里回显「有哪些工具」）；
 # agent_events 是「产生问答事件流」的核心异步生成器，/api/agent/chat 消费它。
@@ -1390,6 +1392,8 @@ def retrieve_only(
     # 不传就用配置里的默认条数。
     top_k: int | None = None,
     rerank: bool = Query(False, description="是否调用大模型二次排序（默认关闭，保持纯检索零成本）"),
+    # 应用层限流（IP+用户维度令牌桶，超限 429）；见 app/ratelimit.py 的「已知限制」说明。
+    _limit: None = Depends(ratelimit.rate_limit),
 ) -> dict[str, Any]:
     """只走混合检索，不调用大模型 —— 调参和排查检索质量时用。
 
@@ -1512,6 +1516,8 @@ def _finalize_qa(
 def chat(
     payload: ChatRequest,
     user: dict[str, Any] | None = Depends(auth.optional_user),
+    # 应用层限流（IP+用户维度令牌桶，超限 429）；见 app/ratelimit.py 的「已知限制」说明。
+    _limit: None = Depends(ratelimit.rate_limit),
 ) -> StreamingResponse:
     # 【新增鉴权依赖 optional_user】登录了就拿到用户信息、没登录就是 None。
     # 为什么加上它：缓存要「未登录不进缓存」，必须知道有没有登录。
@@ -1667,6 +1673,8 @@ async def agent_chat(
     payload: AgentChatRequest,
     request: Request,
     user: dict[str, Any] | None = Depends(auth.optional_user),
+    # 应用层限流（IP+用户维度令牌桶，超限 429）；见 app/ratelimit.py 的「已知限制」说明。
+    _limit: None = Depends(ratelimit.rate_limit),
 ) -> StreamingResponse:
     """Agent 问答：由大模型自主决定是否调用知识库检索工具。
 
@@ -1975,9 +1983,11 @@ def ingest_status() -> dict[str, Any]:
 
 # 可观测性指标汇总：返回问答总数、平均/最大耗时、平均首字延迟、模式分布、
 # 缓存命中率、重排应用率。数字全部来自 metrics.db，读失败时返回一份空统计（不报错）。
+# 【部署加固】指标属于运营数据，部署后不对外裸露：加 current_user 依赖，未登录返回 401；
+#   /api/health 保持公开（容器探活 / 部署健康检查要用，不能一起收进门禁）。
 @app.get("/api/metrics")
-def metrics_endpoint() -> dict[str, Any]:
-    """查看问答运行指标（见 ``metrics.summary``）。"""
+def metrics_endpoint(user: dict[str, Any] = Depends(auth.current_user)) -> dict[str, Any]:
+    """查看问答运行指标（见 ``metrics.summary``）。需要登录。"""
     return metrics_store.summary(get_settings())
 
 
