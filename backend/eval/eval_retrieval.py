@@ -77,7 +77,15 @@ def _retrieve_hybrid(question: str, s: Any) -> list[dict[str, Any]]:
 def _retrieve_hybrid_rerank(question: str, s: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """第三种配置：混合检索候选再交给大模型重排，返回 (结果, 重排元信息)。"""
     result = retrieve(question, settings=s, final_k=CANDIDATE_DEPTH)
-    hits, meta = rerank_hits(question, result.hits, s, top_k=RERANK_TOP_K)
+    # 【重排候选池怎么定（关键修正）】历史上把 20 条候选整包喂给重排，推理模型的
+    #   思维链把 token 预算吃光（finish_reason=length），6/10 题静默降级、C 档等于 B。
+    #   现在池子 = max(生产 RERANK_CANDIDATES, 保留条数) + 1：
+    #   · 「+1」是因为 rerank_hits 有短路——候选数 ≤ 保留条数就直接跳过重排
+    #     （本脚本保留 RERANK_TOP_K=10 条），恰好 10 条时重排一次都不会跑，C 档又会退化成 B；
+    #   · 基准取生产配置 RERANK_CANDIDATES，让评测喂给重排的量级与线上一致
+    #     （当前 .env 是 10，池子即 11 条，比历史的 20 条几乎减半）。
+    pool = max(s.rerank_candidates, RERANK_TOP_K) + 1
+    hits, meta = rerank_hits(question, result.hits[:pool], s, top_k=RERANK_TOP_K)
     return hits, meta
 
 

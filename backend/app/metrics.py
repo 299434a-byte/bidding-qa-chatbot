@@ -23,7 +23,7 @@
 对外接口：
     · ``record(...)``  —— 记一条问答指标；失败静默返回 ``False``；
     · ``summary(...)`` —— 汇总统计：总数 / 平均最大耗时 / 平均首字延迟 /
-      模式分布 / 缓存命中率 / 重排应用率。
+      模式分布 / 缓存命中率 / 重排应用率与成功失败计数（含重排成功率）。
 
 所有读写失败一律静默降级：指标是「旁路统计」，绝不能因为它而影响问答。
 """
@@ -56,6 +56,7 @@ from .config import Settings, get_settings
 #   sources_count  —— 本次引用了几条参考来源；
 #   cache_hit      —— 是否命中缓存（0/1，SQLite 没有专门的布尔类型，用整数表示）；
 #   rerank_applied —— 本次是否应用了重排（0/1）；
+#   rerank_failed  —— 本次是否「尝试了重排但失败降级」（0/1），与 applied 互斥；
 #   created_at     —— 记录时间（UTC 的 ISO 文本）。
 _DDL = """
 CREATE TABLE IF NOT EXISTS qa_metrics (
@@ -66,6 +67,7 @@ CREATE TABLE IF NOT EXISTS qa_metrics (
     sources_count  INTEGER NOT NULL DEFAULT 0,
     cache_hit      INTEGER NOT NULL DEFAULT 0,
     rerank_applied INTEGER NOT NULL DEFAULT 0,
+    rerank_failed  INTEGER NOT NULL DEFAULT 0,
     created_at     TEXT NOT NULL
 );
 """
@@ -108,6 +110,16 @@ def _ensure_schema(conn: sqlite3.Connection, path: Path) -> None:
         if key in _schema_ready:
             return
         conn.execute(_DDL)
+        # 【存量库补列】旧版本建的表没有 rerank_failed 列；CREATE TABLE IF NOT EXISTS
+        #   只保证「表不存在才建」，不会给已有的表加新列，所以这里显式补一次。
+        #   新库刚建就自带这列时，ALTER 会报「duplicate column name」——属预期分支。
+        try:
+            conn.execute(
+                "ALTER TABLE qa_metrics ADD COLUMN rerank_failed INTEGER NOT NULL DEFAULT 0"
+            )
+        except Exception:
+            # 【静默】列已存在，说明这轮不用补，忽略即可。
+            pass
         conn.commit()
         _schema_ready.add(key)
 
@@ -125,6 +137,7 @@ def record(
     sources_count: int = 0,
     cache_hit: bool = False,
     rerank_applied: bool = False,
+    rerank_failed: bool = False,
     settings: Settings | None = None,
 ) -> bool:
     """记一条问答指标。成功返回 ``True``；任何失败静默返回 ``False``。
@@ -135,7 +148,8 @@ def record(
       · first_token_ms —— 首字延迟（毫秒）；没有文字输出时传 ``None``；
       · sources_count  —— 引用来源条数；
       · cache_hit      —— 是否命中缓存；
-      · rerank_applied —— 是否应用了重排。
+      · rerank_applied —— 是否应用了重排；
+      · rerank_failed  —— 是否「尝试了重排但失败降级」（静默降级也得留痕，否则永远看不见）。
 
     【为什么整个函数包 try/except（对应硬要求）】
       记指标是「旁路统计」。万一磁盘满了、库被锁了，也只是「这条统计丢了」，
@@ -148,8 +162,9 @@ def record(
             _ensure_schema(conn, s.metrics_db_path)
             conn.execute(
                 "INSERT INTO qa_metrics "
-                "(mode, elapsed_ms, first_token_ms, sources_count, cache_hit, rerank_applied, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "(mode, elapsed_ms, first_token_ms, sources_count, cache_hit, "
+                "rerank_applied, rerank_failed, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     mode or "llm",
                     # 耗时统一取「非负浮点」；传进来 None/负数时兜底成 0。
@@ -160,6 +175,7 @@ def record(
                     # 布尔转成 0/1 存进整数列。
                     1 if cache_hit else 0,
                     1 if rerank_applied else 0,
+                    1 if rerank_failed else 0,
                     _now_iso(),
                 ),
             )
@@ -181,7 +197,11 @@ def summary(settings: Settings | None = None) -> dict[str, Any]:
       · ``avg_first_token_ms``  —— 平均首字延迟（毫秒；没有首字数据的请求不计入）；
       · ``mode_distribution``   —— 各模式各占多少次（如 {"llm": 7, "cache": 3}）；
       · ``cache_hit_rate``      —— 缓存命中率（0~1 的小数，保留四位）；
-      · ``rerank_applied_rate`` —— 重排应用率（0~1 的小数，保留四位）。
+      · ``rerank_applied_rate`` —— 重排应用率（0~1 的小数，保留四位）；
+      · ``rerank_applied``      —— 重排成功的次数（计数）；
+      · ``rerank_failed``       —— 重排失败降级的次数（计数）；
+      · ``rerank_success_rate`` —— 重排成功率 = 成功 /（成功 + 失败），
+        分母只算「真正尝试过重排」的问答；一次都没尝试的请求不进分母。
     """
     s = settings or get_settings()
     # 先准备一份「空统计」作为兜底；一旦下面出错就返回它。
@@ -193,6 +213,9 @@ def summary(settings: Settings | None = None) -> dict[str, Any]:
         "mode_distribution": {},
         "cache_hit_rate": 0.0,
         "rerank_applied_rate": 0.0,
+        "rerank_applied": 0,
+        "rerank_failed": 0,
+        "rerank_success_rate": 0.0,
     }
     # 【静默降级】读指标失败时返回空统计（接口照常可用，只是数字是 0）。
     try:
@@ -205,14 +228,16 @@ def summary(settings: Settings | None = None) -> dict[str, Any]:
             #   MAX(elapsed_ms)           —— 最大耗时；
             #   AVG(first_token_ms)       —— 平均首字延迟（SQLite 的 AVG 会自动跳过 NULL 行）；
             #   SUM(cache_hit)            —— 命中的条数（0/1 相加），除以总数就是命中率；
-            #   SUM(rerank_applied)       —— 应用重排的条数。
+            #   SUM(rerank_applied)       —— 应用重排的条数；
+            #   SUM(rerank_failed)        —— 重排失败降级的条数（成功率的分母的一部分）。
             row = conn.execute(
                 "SELECT COUNT(*) AS total, "
                 "COALESCE(AVG(elapsed_ms), 0) AS avg_elapsed, "
                 "COALESCE(MAX(elapsed_ms), 0) AS max_elapsed, "
                 "COALESCE(AVG(first_token_ms), 0) AS avg_first_token, "
                 "COALESCE(SUM(cache_hit), 0) AS hits, "
-                "COALESCE(SUM(rerank_applied), 0) AS reranks "
+                "COALESCE(SUM(rerank_applied), 0) AS reranks, "
+                "COALESCE(SUM(rerank_failed), 0) AS rerank_fails "
                 "FROM qa_metrics"
             ).fetchone()
             # 按模式分组计数（例如 llm 有多少次、cache 有多少次）。
@@ -226,8 +251,13 @@ def summary(settings: Settings | None = None) -> dict[str, Any]:
         # 命中率 / 重排率：没有数据时记 0，避免除以 0。
         hits = int(row["hits"] or 0)
         reranks = int(row["reranks"] or 0)
+        rerank_fails = int(row["rerank_fails"] or 0)
         cache_hit_rate = round(hits / total, 4) if total else 0.0
         rerank_applied_rate = round(reranks / total, 4) if total else 0.0
+        # 重排成功率：分母只算「真正尝试过重排」的问答（成功 + 失败）；
+        # 缓存命中、候选不足没尝试的请求不进分母，否则会把成功率虚高地摊薄。
+        attempted = reranks + rerank_fails
+        rerank_success_rate = round(reranks / attempted, 4) if attempted else 0.0
         return {
             "total": total,
             "avg_elapsed_ms": round(float(row["avg_elapsed"] or 0.0), 1),
@@ -236,6 +266,9 @@ def summary(settings: Settings | None = None) -> dict[str, Any]:
             "mode_distribution": mode_distribution,
             "cache_hit_rate": cache_hit_rate,
             "rerank_applied_rate": rerank_applied_rate,
+            "rerank_applied": reranks,
+            "rerank_failed": rerank_fails,
+            "rerank_success_rate": rerank_success_rate,
         }
     except Exception:
         # 【关键】读指标失败时返回空统计，接口不报错。

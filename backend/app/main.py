@@ -403,6 +403,9 @@ class _EventCollector:
         # 本轮检索是否「真正应用了重排」（来自 retrieval 事件的 meta）。
         # 用于可观测性指标统计「重排应用率」；默认 False（没收到或没生效都算没应用）。
         self.rerank_applied = False
+        # 本轮重排是否「尝试过但失败降级」（来自 retrieval meta 的 rerank_error）。
+        # 与 rerank_applied 一起构成「重排成功率」的两个计数口径；默认 False。
+        self.rerank_failed = False
         # PostgreSQL 查询信息（SQL 文本、返回行数、是否出错）；没查过就是 None。
         self.sql: dict[str, Any] | None = None
         # Neo4j 图谱查询信息（Cypher 文本、返回行数、是否出错）；没查过就是 None。
@@ -438,10 +441,11 @@ class _EventCollector:
         elif etype == "tool_result":
             self.tool_results.append({"name": event.get("name"), "count": event.get("count")})
         # 检索统计事件：meta 里带「重排是否生效」（rerank_applied）。
-        # 只取这一个字段供指标统计用（其余检索统计前端会自己显示，无需在此保存）。
+        # 只取这两个字段（生效与否、失败与否）供指标统计用（其余检索统计前端会自己显示）。
         elif etype == "retrieval":
             meta = event.get("meta") or {}
             self.rerank_applied = bool(meta.get("rerank_applied"))
+            self.rerank_failed = bool(meta.get("rerank_error"))
         # 参考来源事件：直接整体保存（`or []` 保证即使上游给 None 也存成空列表，
         # 避免后面遍历时对 None 报错）。
         elif etype == "sources":
@@ -1449,6 +1453,7 @@ def _finalize_qa(
     sources_count: int,
     cache_hit: bool,
     rerank_applied: bool,
+    rerank_failed: bool = False,
 ) -> None:
     """问答收尾的统一动作：记一条指标 + 打一行日志（两个问答入口共用）。
 
@@ -1463,7 +1468,8 @@ def _finalize_qa(
       · first_token_ms —— 首字延迟（毫秒）；没有正文时传 None；
       · sources_count  —— 引用来源条数；
       · cache_hit      —— 是否命中缓存；
-      · rerank_applied —— 是否应用了重排。
+      · rerank_applied —— 是否应用了重排；
+      · rerank_failed  —— 重排是否「尝试过但失败降级」（默认 False；缓存命中走不到重排）。
 
     【硬要求：静默降级】记指标失败绝不影响问答（metrics.record 内部已兜底）；
     日志是标准库 logging，写日志本身设计上不会抛异常影响主流程。
@@ -1478,6 +1484,7 @@ def _finalize_qa(
         sources_count=sources_count,
         cache_hit=cache_hit,
         rerank_applied=rerank_applied,
+        rerank_failed=rerank_failed,
         settings=settings,
     )
     # 打一行汇总日志：包含「收到提问 / 本次耗时 / 命中缓存」三项关键信息。
@@ -1540,6 +1547,10 @@ def chat(
         answer_parts: list[str] = []
         done_mode = "llm"
         rerank_applied = False
+        # 重排是否「尝试过但失败降级」：retrieval meta 里带 rerank_error 就算失败一次。
+        # 【为什么要单独记】重排失败后静默退回 RRF 原序，回答照常；不记这一笔，
+        # /api/metrics 就只能看到「应用率」，永远发现不了「总在失败」的重排。
+        rerank_failed = False
 
         # ---------------- 情况一：缓存命中，直接回放 ----------------
         if cached is not None:
@@ -1583,6 +1594,7 @@ def chat(
                 elif etype == "retrieval":
                     meta = event.get("meta") or {}
                     rerank_applied = bool(meta.get("rerank_applied"))
+                    rerank_failed = bool(meta.get("rerank_error"))
                 elif etype == "done":
                     done_mode = event.get("mode") or done_mode
                 # 原样转发给前端。
@@ -1608,6 +1620,7 @@ def chat(
             sources_count=len(sources),
             cache_hit=False,
             rerank_applied=rerank_applied,
+            rerank_failed=rerank_failed,
         )
         # SSE 协议规定：流结束时发一行 [DONE] 表示「到此为止」。
         yield "data: [DONE]\n\n"
@@ -1878,6 +1891,7 @@ async def agent_chat(
             sources_count=len(collector.sources),
             cache_hit=False,
             rerank_applied=collector.rerank_applied,
+            rerank_failed=collector.rerank_failed,
         )
 
         # 同 /api/chat：流末尾发 [DONE] 表示结束。
