@@ -1,0 +1,169 @@
+{
+  "main": {
+    "msgs": [
+      {
+        "cls": "msg msg-user",
+        "left": 452,
+        "width": 800,
+        "centerDelta": 0
+      },
+      {
+        "cls": "msg msg-assistant",
+        "left": 452,
+        "width": 800,
+        "centerDelta": 0
+      }
+    ],
+    "msgTimeTexts": [
+      "\"00:11\"",
+      "\"00:11\""
+    ],
+    "msgNameTexts": [
+      "你",
+      "助手"
+    ],
+    "chipWidths": [
+      183,
+      183,
+      183,
+      183,
+      183
+    ],
+    "forbidden": [],
+    "evRanksFirst": "向量 #1 BM25 #3 融合 #1 重排 #3 ↓2",
+    "markCount": 9,
+    "railUserText": "未登录 | 登录 / 注册"
+  },
+  "probes": {
+    "w700": {
+      "table": {
+        "clientW": 586,
+        "scrollW": 586,
+        "overflows": false
+      },
+      "dates": [
+        {
+          "text": "2024-08-30",
+          "lines": 1,
+          "w": 112,
+          "cellH": 41
+        },
+        {
+          "text": "2024-08-27",
+          "lines": 1,
+          "w": 112,
+          "cellH": 65
+        },
+        {
+          "text": "2024-08-21",
+          "lines": 1,
+          "w": 112,
+          "cellH": 65
+        },
+        {
+          "text": "2024-08-15",
+          "lines": 1,
+          "w": 112,
+          "cellH": 65
+        },
+        {
+          "text": "2024-08-09",
+          "lines": 1,
+          "w": 112,
+          "cellH": 65
+        }
+      ],
+      "dateWrapped": false,
+      "docScrollW": 700,
+      "docClientW": 700,
+      "forbidden": []
+    },
+    "w520": {
+      "table": {
+        "clientW": 406,
+        "scrollW": 480,
+        "overflows": true
+      },
+      "dates": [
+        {
+          "text": "2024-08-30",
+          "lines": 1,
+          "w": 112,
+          "cellH": 88
+        },
+        {
+          "text": "2024-08-27",
+          "lines": 1,
+          "w": 112,
+          "cellH": 88
+        },
+        {
+          "text": "2024-08-21",
+          "lines": 1,
+          "w": 112,
+          "cellH": 88
+        },
+        {
+          "text": "2024-08-15",
+          "lines": 1,
+          "w": 112,
+          "cellH": 88
+        },
+        {
+          "text": "2024-08-09",
+          "lines": 1,
+          "w": 112,
+          "cellH": 88
+        }
+      ],
+      "dateWrapped": false,
+      "docScrollW": 520,
+      "docClientW": 520,
+      "forbidden": []
+    },
+    "w375": {
+      "table": {
+        "clientW": 261,
+        "scrollW": 480,
+        "overflows": true
+      },
+      "dates": [
+        {
+          "text": "2024-08-30",
+          "lines": 1,
+          "w": 112,
+          "cellH": 88
+        },
+        {
+          "text": "2024-08-27",
+          "lines": 1,
+          "w": 112,
+          "cellH": 88
+        },
+        {
+          "text": "2024-08-21",
+          "lines": 1,
+          "w": 112,
+          "cellH": 88
+        },
+        {
+          "text": "2024-08-15",
+          "lines": 1,
+          "w": 112,
+          "cellH": 88
+        },
+        {
+          "text": "2024-08-09",
+          "lines": 1,
+          "w": 112,
+          "cellH": 88
+        }
+      ],
+      "dateWrapped": false,
+      "docScrollW": 375,
+      "docClientW": 375,
+      "forbidden": []
+    }
+  },
+  "adminForbidden": []
+}

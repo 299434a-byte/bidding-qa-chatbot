@@ -636,6 +636,36 @@ a {
   margin-top: var(--sp-12);
 }
 
+/* 底部登录区减重：一行放状态与小按钮（不再套卡片 + 36px 大按钮） */
+.rail-user-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-8);
+}
+
+.rail-note {
+  font-size: var(--text-12);
+  color: var(--neutral-400);
+}
+
+.rail-login {
+  height: 28px;
+  padding: 0 var(--sp-12);
+  border: 1px solid var(--neutral-300);
+  border-radius: var(--r-8);
+  background: var(--neutral-0);
+  color: var(--neutral-700);
+  font-size: var(--text-12);
+  cursor: pointer;
+  transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease);
+}
+
+.rail-login:hover {
+  background: var(--interact-hover);
+  border-color: var(--neutral-400);
+}
+
 .brand {
   display: flex;
   align-items: center;
@@ -788,6 +818,21 @@ a {
 .msg-assistant .msg-avatar {
   background: var(--neutral-200);
   color: var(--neutral-600);
+}
+
+/* 用户消息：主色浅调卡片 + 头像换到右侧（row-reverse）——
+   与助手的素文本正文形成「两栏 / 两种容器」，消息层级一眼可辨 */
+.msg-user {
+  flex-direction: row-reverse;
+}
+
+.msg-user .msg-body {
+  flex: 0 1 auto;
+  max-width: 86%;
+  background: var(--primary-50);
+  border: 1px solid color-mix(in srgb, var(--primary-500) 16%, transparent);
+  border-radius: var(--r-12);
+  padding: var(--sp-8) var(--sp-16) var(--sp-12);
 }
 
 .msg-body {
@@ -991,11 +1036,23 @@ a {
   padding: var(--sp-8) var(--sp-12);
   text-align: left;
   vertical-align: top;
+  /* 每列最小宽度（8em=112px，border-box 含 24px 内边距与边框，内容区 86px > 日期自然宽 ~78px）：
+     列被挤压到下限就停止收缩，「发布日期 2024-08-30」这类短列不再折行；
+     各列下限之和超过容器时，由外层 .md-table 横向滚动接管 */
+  min-width: 8em;
 }
 
 .md-table th {
   background: var(--neutral-50);
   font-weight: var(--fw-600);
+  /* 表头是一列的名字，挤成两行会失去列语义——永不换行 */
+  white-space: nowrap;
+}
+
+.md-table td {
+  /* 表格内不用 answer 的 break-word：ASCII 日期序列不从中间断开，中文照常换行 */
+  word-break: normal;
+  overflow-wrap: break-word;
 }
 
 /* ---- 行内引用胶囊（对标 Perplexity） ---- */
@@ -1121,9 +1178,10 @@ button.cite:active {
 }
 
 /* ---- 来源条（答案上方，Perplexity 式编号卡片） ---- */
+/* 等宽网格：同排卡片宽度天然一致，末尾不满一行时只占一格、不再拉通整行 */
 .src-strip {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
   gap: var(--sp-8);
   margin: var(--sp-8) 0 var(--sp-12);
 }
@@ -1133,8 +1191,7 @@ button.cite:active {
   flex-direction: column;
   gap: var(--sp-4);
   text-align: left;
-  flex: 1 1 172px;
-  max-width: 100%;
+  min-width: 0;
   padding: var(--sp-8) var(--sp-12);
   border-radius: var(--r-10);
   border: 1px solid var(--neutral-200);
@@ -1795,6 +1852,11 @@ button.cite:active {
   color: var(--danger-600);
 }
 
+/* 未启用重排时第四层名次的占位（灰色弱化，不与有值的名次抢视觉） */
+.ev-rank-none {
+  color: var(--neutral-400);
+}
+
 .ev-snippet {
   margin-top: var(--sp-8);
   font-size: var(--text-13);
@@ -1807,6 +1869,14 @@ button.cite:active {
   padding: var(--sp-8) var(--sp-12);
   max-height: 180px;
   overflow-y: auto;
+}
+
+/* 命中片段里被 query 词命中的部分：主色浅底（不用黄色——黄在本项目是警告语义） */
+.ev-snippet mark {
+  background: color-mix(in srgb, var(--primary-500) 18%, transparent);
+  color: inherit;
+  border-radius: var(--r-6);
+  padding: 0 2px;
 }
 
 .ev-foot {

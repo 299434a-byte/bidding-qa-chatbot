@@ -43,11 +43,17 @@ type Props = {
   locate: { index: number; nonce: number } | null;
 };
 
+/** 中文功能词（的 / 有 / 哪些…）：中文没有空格，整句会被粘成一个词，需要按这些字二次切开 */
+const HIGHLIGHT_STOP =
+  "的了吗呢么啊吧是在有和与及或对被把从向往到为以于其中上下个些怎何几许多少请问我你他她它们这那哪些什么怎么样是不是有没有查询查找搜索查一下看看相关关于";
+
 /** 从提问里抽出用于高亮的词：按标点/空白切开，保留长度 ≥2 的词，最多 8 个 */
 function extractTerms(query: string): string[] {
-  return Array.from(
-    new Set(query.split(/[^一-龥A-Za-z0-9]+/).filter((term) => term.length >= 2)),
-  ).slice(0, 8);
+  // 只按标点切时，「市政道路工程的招标公告有哪些」会是一整个词、永远匹配不到片段——
+  // 所以先按标点/空白切开（原逻辑），再按功能词把粘连的实词二次切开，高亮才真正生效
+  const pieces = query.split(/[^一-龥A-Za-z0-9]+/);
+  const terms = pieces.flatMap((piece) => piece.split(new RegExp(`[${HIGHLIGHT_STOP}]+`)));
+  return Array.from(new Set(terms.filter((term) => term.length >= 2))).slice(0, 8);
 }
 
 /** 把命中片段里的关键词包上 <mark> 高亮；用捕获组 split，奇数位就是命中词 */
@@ -232,7 +238,7 @@ export default function EvidencePanel({ sources, query, size, onSizeChange, onCl
                     <RankChip label="向量" rank={source.ranks?.dense ?? null} />
                     <RankChip label="BM25" rank={source.ranks?.bm25 ?? null} />
                     <span title={`按融合分数排出的名次（重排前）：第 ${fusedRank} 位`}>融合 #{fusedRank}</span>
-                    {rerankRank != null && (
+                    {rerankRank != null ? (
                       <span
                         className={`ev-rank-shift ${shift != null && shift > 0 ? "up" : shift != null && shift < 0 ? "down" : ""}`}
                         title={`重排模型给出的名次：第 ${rerankRank} 位（融合时是第 ${fusedRank} 位）`}
@@ -241,6 +247,15 @@ export default function EvidencePanel({ sources, query, size, onSizeChange, onCl
                         {shift != null && shift > 0 && <span aria-label={`提升了 ${shift} 名`}>↑{shift}</span>}
                         {shift != null && shift < 0 && <span aria-label={`下降了 ${-shift} 名`}>↓{-shift}</span>}
                         {shift === 0 && <span>（名次未变）</span>}
+                      </span>
+                    ) : (
+                      // 后端未返回重排名次（未配置重排 / 候选不足 / 调用失败降级）：
+                      // 第四层的位置照样留出来并标注「未启用」，四层名次始终对齐可见
+                      <span
+                        className="ev-rank-none"
+                        title="本轮未启用大模型重排（未配置 / 候选不足 / 调用失败已降级）"
+                      >
+                        重排 未启用
                       </span>
                     )}
                   </div>

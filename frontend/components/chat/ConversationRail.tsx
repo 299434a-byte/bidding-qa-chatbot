@@ -67,27 +67,22 @@ export default function ConversationRail({
           </div>
         </div>
 
-        {/* 底部：用户信息 / 注销 */}
+        {/* 底部：用户信息 / 注销（单行减重：状态一行放，小按钮贴右侧，不再套卡片占位） */}
         <div className="rail-user">
           {user ? (
-            <div className="card">
-              <div className="row">
-                <span className="row-key">已登录</span>
-                <span className="badge badge-mint">{user.username}</span>
-              </div>
-              <button className="btn" type="button" onClick={onLogout} style={{ marginTop: "var(--sp-8)" }}>
-                <Icon name="x" size={14} />
+            <div className="rail-user-row">
+              <span className="badge badge-mint">{user.username}</span>
+              <button className="act-btn" type="button" onClick={onLogout}>
+                <Icon name="x" size={13} />
                 注销
               </button>
             </div>
           ) : (
-            <div className="card">
-              <div className="row">
-                <span className="row-key">未登录</span>
-                <span className="badge badge-plain">问答不保存</span>
-              </div>
+            <div className="rail-user-row">
+              {/* 未登录的完整说明在历史区顶部已有，这里只留最轻的一行状态 */}
+              <span className="rail-note">未登录</span>
               {/* 次级描边按钮：不与底部的发送键抢焦点 */}
-              <button className="btn" type="button" onClick={onLoginClick} style={{ marginTop: "var(--sp-8)" }}>
+              <button className="rail-login" type="button" onClick={onLoginClick}>
                 登录 / 注册
               </button>
             </div>

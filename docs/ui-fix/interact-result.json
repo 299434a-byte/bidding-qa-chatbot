@@ -1,0 +1,39 @@
+{
+  "username": "uitest_mv2lwxul",
+  "steps": [
+    {
+      "step": "A-register",
+      "username": "uitest_mv2lwxul",
+      "newConversationButton": true
+    },
+    {
+      "step": "B-streaming",
+      "stopButtonVisible": true,
+      "answerLength": 85
+    },
+    {
+      "step": "B-stopped",
+      "stopButtonGone": true,
+      "answerLengthDuring": 85,
+      "answerLengthAfterStop": 97,
+      "answerLengthAfterWait2s": 97,
+      "contentKept": true,
+      "stoppedNoGrowth": true,
+      "statusTextAfterStop": ""
+    },
+    {
+      "step": "C-streaming-2",
+      "messagesDuringStream": 4,
+      "stopButtonVisible": true
+    },
+    {
+      "step": "C-new-conversation",
+      "messagesDuringStream": 4,
+      "messagesAfterClick": 0,
+      "messagesAfterWait2_5s": 0,
+      "clearedAndStaysClear": true,
+      "stopButtonGone": true
+    }
+  ],
+  "errors": []
+}

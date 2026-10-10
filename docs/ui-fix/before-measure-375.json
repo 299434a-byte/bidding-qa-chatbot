@@ -1,0 +1,11 @@
+{
+  "docScrollW": 375,
+  "docClientW": 375,
+  "bodyScrollW": 375,
+  "table": {
+    "clientW": 261,
+    "scrollW": 480,
+    "overflows": true
+  },
+  "forbidden": []
+}

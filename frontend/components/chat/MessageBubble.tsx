@@ -223,7 +223,7 @@ function MessageBubble({ msg, highlighted, busy, onFillInput, onAdopt, onOpenEvi
         onMouseLeave={() => setCiteHover(null)}
       >
         <div className="msg-head">
-          <span className="msg-name">{msg.role === "user" ? "你" : "机器人"}</span>
+          <span className="msg-name">{msg.role === "user" ? "你" : "助手"}</span>
           <span className="msg-time">{fmtTime(msg.ts)}</span>
           {msg.mode && !msg.streaming && <span className="badge badge-plain">{msg.mode}</span>}
         </div>

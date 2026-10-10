@@ -1,0 +1,77 @@
+{
+  "main": {
+    "left": 264,
+    "width": 1176,
+    "height": 900
+  },
+  "msgs": [
+    {
+      "cls": "msg msg-user",
+      "left": 452,
+      "width": 800,
+      "height": 96,
+      "centerDelta": 0
+    },
+    {
+      "cls": "msg msg-assistant",
+      "left": 452,
+      "width": 800,
+      "height": 652,
+      "centerDelta": 0
+    }
+  ],
+  "msgTimeTexts": [
+    "\"\"",
+    "\"\""
+  ],
+  "msgNameTexts": [
+    "你",
+    "机器人"
+  ],
+  "chipWidths": [
+    183,
+    183,
+    183,
+    183,
+    756
+  ],
+  "table": {
+    "clientW": 754,
+    "scrollW": 754,
+    "overflows": false
+  },
+  "dateCells": [
+    {
+      "text": "2024-08-30",
+      "h": 41,
+      "w": 136
+    },
+    {
+      "text": "2024-08-27",
+      "h": 41,
+      "w": 136
+    },
+    {
+      "text": "2024-08-21",
+      "h": 41,
+      "w": 136
+    },
+    {
+      "text": "2024-08-15",
+      "h": 41,
+      "w": 136
+    },
+    {
+      "text": "2024-08-09",
+      "h": 41,
+      "w": 136
+    }
+  ],
+  "messagesScrollW": 1176,
+  "messagesClientW": 1176,
+  "docScrollW": 1440,
+  "docClientW": 1440,
+  "forbidden": [],
+  "evRanksHTML": "向量 #1 BM25 #3 融合 #1 重排 #3 ↓2",
+  "railUserText": "未登录 | 问答不保存 | 登录 / 注册"
+}

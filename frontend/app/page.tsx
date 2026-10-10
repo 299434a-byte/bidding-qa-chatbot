@@ -190,7 +190,13 @@ export default function Home() {
       const res = await api.conversationDetail(id);
       const restored: Message[] = res.messages.map((item) => {
         if (item.role === "user") {
-          return { id: item.id, role: "user" as const, content: item.content };
+          // created_at 兼容 SQLite 的 "YYYY-MM-DD HH:MM:SS" 与 ISO 两种写法；解析失败按无时间处理
+          return {
+            id: item.id,
+            role: "user" as const,
+            content: item.content,
+            ts: item.created_at ? Date.parse(item.created_at.replace(" ", "T")) || null : null,
+          };
         }
         const meta = item.meta;
         // 把工具调用与结果按名字配对，补回「命中 N 条」徽标
@@ -203,6 +209,7 @@ export default function Home() {
           id: item.id,
           role: "assistant" as const,
           content: item.content,
+          ts: item.created_at ? Date.parse(item.created_at.replace(" ", "T")) || null : null,
           mode: meta?.done_mode ?? meta?.mode ?? res.conversation.mode,
           toolCalls,
           sources: meta?.sources,
@@ -356,9 +363,11 @@ export default function Home() {
             id: uid(),
             role: "user",
             content: question,
+            // 消息头像旁的时间戳：创建当下记录，展示层 fmtTime 格式化为 HH:mm
+            ts: Date.now(),
             image: previewUrl ? { url: previewUrl, name: file.name } : undefined,
           },
-          { id: assistantId, role: "assistant", content: "", analyzing: true },
+          { id: assistantId, role: "assistant", content: "", ts: Date.now(), analyzing: true },
         ]);
 
         try {
@@ -405,8 +414,9 @@ export default function Home() {
 
       setMessages((prev) => [
         ...(base ?? prev),
-        { id: uid(), role: "user", content: question },
-        { id: assistantId, role: "assistant", content: "", streaming: true },
+        // 两条消息都在创建时打上时间戳，消息头像旁才会显示 HH:mm
+        { id: uid(), role: "user", content: question, ts: Date.now() },
+        { id: assistantId, role: "assistant", content: "", ts: Date.now(), streaming: true },
       ]);
 
       try {
