@@ -18,6 +18,7 @@ import {
   type Health,
   type IngestStatus,
   type KbStats,
+  type MetricsSummary,
   type SchemaResponse,
   type User,
 } from "@/lib/api";
@@ -40,6 +41,8 @@ export default function AdminPage() {
   const [health, setHealth] = useState<Health | null>(null);
   const [kb, setKb] = useState<KbStats | null>(null);
   const [schema, setSchema] = useState<SchemaResponse | null>(null);
+  /** 问答指标（含重排成功率），供「重排成功率」状态卡展示 */
+  const [metrics, setMetrics] = useState<MetricsSummary | null>(null);
   const [ingest, setIngest] = useState<IngestStatus | null>(null);
   const [loading, setLoading] = useState(false);
   /** 首次加载是否已完成（用于骨架屏） */
@@ -56,10 +59,16 @@ export default function AdminPage() {
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const [h, k, s] = await Promise.all([api.health(), api.kbStats(), api.schema()]);
+      const [h, k, s, m] = await Promise.all([
+        api.health(),
+        api.kbStats(),
+        api.schema(),
+        api.metrics(),
+      ]);
       setHealth(h);
       setKb(k);
       setSchema(s);
+      setMetrics(m);
       setError(null);
       setLastUpdated(clockText());
     } catch (e) {
@@ -198,7 +207,7 @@ export default function AdminPage() {
         <div className="admin-card admin-span-all">
           <div className="admin-card-title">系统状态</div>
           {loadedOnce ? (
-            <StatusCards health={health} kb={kb} schema={schema} />
+            <StatusCards health={health} kb={kb} schema={schema} metrics={metrics} />
           ) : (
             <div className="stat-grid">
               {[0, 1, 2, 3, 4, 5].map((i) => (

@@ -1,7 +1,7 @@
 "use client";
 
 import Icon, { type IconName } from "@/components/ui/icons";
-import type { Health, KbStats, SchemaResponse } from "@/lib/api";
+import type { Health, KbStats, MetricsSummary, SchemaResponse } from "@/lib/api";
 
 /**
  * 系统状态卡片区：按「模型 / 数据 / 工具」三组展示。
@@ -25,6 +25,8 @@ type Props = {
   health: Health | null;
   kb: KbStats | null;
   schema: SchemaResponse | null;
+  /** 问答指标（/api/metrics）；拉取失败或还没拉时为 null，重排成功率卡显示「—」 */
+  metrics?: MetricsSummary | null;
 };
 
 /** 空值统一成 `—` */
@@ -40,11 +42,18 @@ function fmtCount(value: number | undefined, unit: string): string {
   return `${value.toLocaleString("zh-CN")} ${unit}`;
 }
 
-export default function StatusCards({ health, kb, schema }: Props) {
+export default function StatusCards({ health, kb, schema, metrics }: Props) {
   const points = kb?.points ?? 0;
   const dim = kb?.vector_dim ?? 0;
   const pgSource = health?.kb_source === "postgres";
   const mysqlOk = Boolean(schema?.connected);
+
+  // 重排成功率卡的三个口径：只统计「真正尝试过重排」的问答（成功 + 失败），
+  // 缓存命中、候选不足没尝试的请求不进分母；一次都没试过时显示 —（灰点）。
+  const rerankApplied = metrics?.rerank_applied ?? 0;
+  const rerankFailed = metrics?.rerank_failed ?? 0;
+  const rerankTried = rerankApplied + rerankFailed;
+  const rerankRate = metrics?.rerank_success_rate ?? 0;
 
   const groups: { title: string; icon: IconName; cards: StatCard[] }[] = [
     {
@@ -64,6 +73,13 @@ export default function StatusCards({ health, kb, schema }: Props) {
           value: health?.rerank_configured ? dash(health.rerank_model) : "未配置",
           desc: "对初步召回的来源重新排序",
           tone: health?.rerank_configured ? "ok" : "off",
+        },
+        {
+          name: "重排成功率",
+          icon: "chart",
+          value: rerankTried > 0 ? `${Math.round(rerankRate * 100)}%` : "—",
+          desc: rerankTried > 0 ? `成功 ${rerankApplied} 次 · 失败降级 ${rerankFailed} 次` : "尚无重排记录",
+          tone: rerankTried === 0 ? "off" : rerankRate >= 0.5 ? "ok" : "err",
         },
         {
           name: "向量模型",

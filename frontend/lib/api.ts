@@ -88,6 +88,25 @@ export type Health = {
   ingesting: boolean;
 };
 
+/** 后台问答可观测性指标（GET /api/metrics 的返回体，含重排成功/失败计数） */
+export type MetricsSummary = {
+  /** 累计问答次数 */
+  total: number;
+  avg_elapsed_ms: number;
+  max_elapsed_ms: number;
+  avg_first_token_ms: number;
+  mode_distribution: Record<string, number>;
+  cache_hit_rate: number;
+  /** 重排应用率：成功次数 / 全部问答（0~1） */
+  rerank_applied_rate: number;
+  /** 重排成功的次数 */
+  rerank_applied: number;
+  /** 重排失败降级的次数 */
+  rerank_failed: number;
+  /** 重排成功率：成功 /（成功 + 失败），只统计真正尝试过重排的问答（0~1） */
+  rerank_success_rate: number;
+};
+
 /** 推理模式：ReAct / Plan-and-Solve / 深度思考 */
 export type ChatMode = "react" | "plan" | "deep";
 
@@ -457,6 +476,8 @@ export const api = {
       body: JSON.stringify({ mode, recreate: mode === "full" }),
     }),
   ingestStatus: () => req<IngestStatus>("/api/ingest/status"),
+  /** 问答可观测性指标（耗时 / 缓存命中率 / 重排成功率与失败计数） */
+  metrics: () => req<MetricsSummary>("/api/metrics"),
 
   // ------------------------------ 账号体系 ------------------------------ //
   /** 注册并直接拿到令牌 */
