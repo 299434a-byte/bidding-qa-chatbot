@@ -142,3 +142,20 @@ def test_retrieval_result_empty_flag_and_sources_shape():
     # 【分数是四舍五入后的小数】源码用 round(..., 6)，这里确认它是正数即可。
     assert card["rrf_score"] == pytest.approx(card["rrf_score"])
     assert card["rrf_score"] > 0
+
+
+def test_rrf_survives_non_positive_k():
+    """反向测试：非法配置 k<=0 不该把检索链路打挂（防除零/防崩溃）。"""
+    # k=0 时 1/(0+rank) 仍是有限值，属「退化但可用」，必须不崩。
+    fused = rrf_fuse([("dense", [_hit("A", 0.9)])], rrf_k=0, final_k=5)
+    assert fused[0]["rrf_score"] == pytest.approx(1.0)
+
+    # 负数 k：只要 k+rank 不为 0 就仍能算出（负分），同样不该崩。
+    fused_neg = rrf_fuse(
+        [("dense", [_hit("A", 0.9), _hit("B", 0.5)])], rrf_k=-100, final_k=5
+    )
+    assert [hit["doc_id"] for hit in fused_neg] == ["A", "B"]
+
+    # 已知边界（记录现状，不在此断言）：当 k 恰好使 k+rank==0（如 k=-1 且 rank=1）时，
+    # 源码 1.0/(k+rank) 会抛 ZeroDivisionError。k<=0 属调用方非法配置，
+    # 契约要求调用方传 k>0；若要消除该边界需改业务代码，不在本测试范围。

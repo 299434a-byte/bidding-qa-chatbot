@@ -66,6 +66,13 @@ from __future__ import annotations
 # 【为什么需要它】这是个「体面退场」的机制。不主动收尾的话，程序退出时可能留下一堆吓人的报错。
 import atexit
 
+# 【这行在干什么】引入 hashlib，用它的 sha256 给文档正文算「内容指纹」。
+# 【为什么需要】增量建库要判断「库里的旧文档和新生成的文档内容是否一致」，
+#   用「整块文本的 sha256」当指纹最可靠：内容变了指纹必变，内容没变指纹恒定。
+# 【为什么不用 doc_id 判断】doc_id（表:主键:块序号）只表达「是谁」，不表达「内容变没变」；
+#   同一条记录改了字，doc_id 不变但内容变了，必须靠内容指纹才能发现。
+import hashlib
+
 # 【这行在干什么】引入 threading 模块，本文件只用到 Lock（线程锁）。
 # 【为什么需要】Qdrant 的这个本地客户端对象不是「天生线程安全」的，多个请求线程同时
 #   读写可能出乱子。加一把锁，保证同一时刻只有一个线程在操作它（详见各处 with self._lock）。
@@ -160,6 +167,20 @@ def _close_quietly(client: QdrantClient) -> None:
 #   于是即使上层只写 except RuntimeError，也照样能接住它（子类能被父类的网兜住）。
 class VectorStoreError(RuntimeError):
     """向量库操作的可读错误。"""
+
+
+# 【这行在干什么】定义函数 text_hash：给一段正文算「内容指纹」（sha256 十六进制串）。
+# 【为什么需要（增量建库的核心）】增量对比时，光凭 doc_id 只能知道「这条还在不在」，
+#   无法知道「内容改没改」。用整块正文的 sha256 当指纹：内容一样 → 指纹一样；
+#   改一个字 → 指纹完全不同。于是「更新」与「未变」可以精确区分。
+# 【为什么要先 encode 成 utf-8】sha256 只接受「字节」，字符串要先按 utf-8 编码成字节
+#   才能算；中文按 utf-8 编出来是稳定的，所以同一段中文每次算出的指纹都一样。
+# 【注意事项】这是「确定性」计算，不发网络、不读磁盘，可以放心反复调用，代价极低。
+def text_hash(text: str) -> str:
+    """给一段正文算「内容指纹」（sha256 十六进制串）。"""
+    # 先兜住 None：正文理论上是字符串，但历史上可能存成 None，直接 .encode 会报错。
+    # 这里把 None 当空串处理，保证函数在任何输入下都能返回一个字符串。
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
 
 
 # 【这行在干什么】定义函数 point_id_of：把我们的 doc_id 转成 Qdrant 能接受的 UUID。
@@ -594,6 +615,95 @@ class VectorStore:
         #   的尴尬情况（普通锁会导致自己把自己卡死，叫死锁）。所以先退出锁，再调用它。
         # 【注意事项】recreate=True 表示「先删后建」，保证建出来的一定是干净、按当前配置来的集合。
         self.ensure_collection(recreate=True)
+
+    # ------------------------------------------------------------------ #
+    # 增量建库支持：读现有文档指纹 + 按 doc_id 批量删除
+    # 【这段在干什么】给「增量更新」提供两件必备工具：
+    #   ① scroll_existing() —— 把库里现有文档的「编号 + 内容指纹」取出来（只读、分批）；
+    #   ② delete_documents() —— 把「已从数据源消失」的文档按 doc_id 批量删除。
+    # 【为什么单独成段】它们不参与常规问答，只服务于建库；集中在一处便于理解增量方案。
+    # ------------------------------------------------------------------ #
+    def scroll_existing(self, batch_size: int = 1024) -> dict[str, str]:
+        """只读：分批滚动取回全库文档，返回 ``{doc_id: 正文sha256}``。
+
+        【为什么需要它】增量建库要拿「库里现有的文档」和「数据源新生成的文档」做差集，
+        所以必须先把现有文档的标识与内容摘要取回来。返回「指纹」而不是「正文」，
+        是为了省内存：9164 条正文可能有几十 MB，而指纹每条只有 64 个字符。
+
+        【为什么必须分批（关键，别改成一次全取）】库里现在有近万条，将来可能几十万条。
+        一次性 scroll 全部会把这些点的 payload 全拉进内存，可能把内存撑爆。
+        这里按 batch_size（默认 1024）一批一批取，内存里始终只有一批的量，稳。
+
+        【参数解释】batch_size=每批取多少条，默认 1024。
+
+        【其他说明】
+        - with_payload=True：正文和 doc_id 都藏在 payload 里，必须一起取回；
+        - with_vectors=False：我们只要内容指纹，不需要 512 维向量，关掉能显著省传输与内存。
+        """
+        # 集合不存在（还没建过库）就直接返回空字典，表示「库里一条都没有」。
+        # 这样增量流程会把所有新文档都算成 added，逻辑自洽，也不会对不存在的集合发查询而报错。
+        if not self.collection_exists():
+            return {}
+        # 准备结果字典：键是 doc_id，值是正文的 sha256 指纹。
+        existing: dict[str, str] = {}
+        # offset 是「下一页的游标」：Qdrant 的 scroll 是分页的，第一次传 None 表示从头开始，
+        # 每次返回「本页的点 + 下一页游标」，当游标变成 None 就说明翻到底了。这就是分批的关键。
+        offset: Any = None
+        # 加锁：本文件约定「所有真正读写数据库的地方都加锁」，滚动读大量数据同样遵守，
+        # 避免与别的线程的写入交叉进行、读到半新半旧的状态。
+        with self._lock:
+            while True:
+                points, offset = self.client.scroll(
+                    collection_name=self.collection,
+                    limit=batch_size,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                # 逐条把 doc_id → 正文指纹 收集起来。
+                for point in points:
+                    # (p.payload or {}) 先兜住「payload 为空」的极端情况，再 .get 取值。
+                    payload = point.payload or {}
+                    doc_id = payload.get("doc_id")
+                    # 没有 doc_id 的点（理论上不该有）没法参与差集对比，跳过。
+                    if doc_id:
+                        existing[doc_id] = text_hash(payload.get("text") or "")
+                # 游标为空 = 已经翻到最后一页，结束循环。
+                if offset is None:
+                    break
+        return existing
+
+    def delete_documents(self, doc_ids: list[str], batch_size: int = 256) -> int:
+        """按 doc_id 批量删除点，返回实际删除的条数。
+
+        【为什么需要它】增量建库时，某些记录从数据源被删掉（或长文本改短导致多余分块消失），
+        它们在库里对应的点必须清掉，否则会残留「僵尸文档」被检索到。
+
+        【为什么按 point id 删】doc_id（表:主键:块序号）不能直接当 Qdrant 的 ID，
+        必须先用 point_id_of 换算成 UUID，再用 PointIdsList 指定这一批 ID 删除。
+
+        【参数解释】doc_ids=要删除的文档编号列表；batch_size=每批删多少（避免一次删太多）。
+
+        【返回值】删掉的条数（就是传入 doc_ids 的个数，前提是这一步没抛异常）。
+        """
+        # 空输入直接返回 0，省掉后面所有动作。
+        if not doc_ids:
+            return 0
+        # 把 doc_id 换算成 Qdrant 能认的 UUID，并分批。
+        point_ids = [point_id_of(doc_id) for doc_id in doc_ids]
+        deleted = 0
+        with self._lock:
+            for start in range(0, len(point_ids), batch_size):
+                batch = point_ids[start : start + batch_size]
+                # delete + PointIdsList 是 Qdrant 的「按 ID 批量删除」标准用法。
+                # wait=True 表示「等删除真正生效再返回」，保证删完后立刻统计数字是准的。
+                self.client.delete(
+                    collection_name=self.collection,
+                    points_selector=models.PointIdsList(points=batch),
+                    wait=True,
+                )
+                deleted += len(batch)
+        return deleted
 
     # ------------------------------------------------------------------ #
     # 检索

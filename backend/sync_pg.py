@@ -191,8 +191,8 @@ def read_mysql_columns(conn: pymysql.connections.Connection, table: str) -> list
     """读取 MySQL 某张表的列定义（列名、类型、是否允许空、注释）。
 
     【原理】MySQL 提供了 `SHOW FULL COLUMNS FROM 表名` 命令，它会返回一行行的列信息。
-    每行包含 9 个字段，我们只挑其中 4 个有用的：
-        字段名 Field / 类型 Type / 是否可空 Null / 注释 Comment
+    每行包含 9 个字段，我们只挑其中 5 个有用的：
+        字段名 Field / 类型 Type / 是否可空 Null / 键类型 Key / 注释 Comment
 
     【参数解释】
         conn  —— 已连上的 MySQL 连接；
@@ -217,6 +217,8 @@ def read_mysql_columns(conn: pymysql.connections.Connection, table: str) -> list
                 "name": row[0],
                 "column_type": row[1],
                 "nullable": (row[3] or "").upper() == "YES",
+                # row[4] 是 Key 列：主键列的值是 'PRI'。必须带上它，否则重建表时主键会丢。
+                "key": (row[4] or "").upper(),
                 "comment": row[8] or "",
             }
         )
@@ -255,6 +257,14 @@ def recreate_pg_table(
         if not col["nullable"]:
             piece += " NOT NULL"
         definitions.append(piece)
+
+    # 【补主键（关键，别删）】源表的主键列（SHOW FULL COLUMNS 第 5 列 Key = 'PRI'）也要照搬过来。
+    # 【为什么必须有】只搬列、不搬主键的话，全量同步一跑主键就丢了；而建库管道要拿主键列
+    #   当 doc_id 的稳定标识，丢了就只能退化成「行号+1」，重跑建库会产生重复点。
+    pri_cols = [col["name"] for col in columns if (col.get("key") or "").upper() == "PRI"]
+    if pri_cols:
+        # 主键可能由多列组成，所以把列名用逗号连接，写成 PRIMARY KEY (列1, 列2)。
+        definitions.append("PRIMARY KEY (" + ", ".join(quote_ident(c) for c in pri_cols) + ")")
 
     # DROP TABLE IF EXISTS 的 IF EXISTS 很重要：表不存在时不报错，保证脚本可重复运行。
     # CASCADE 表示「如果有别的东西依赖这张表，也一并处理」，避免删除被外键挡住。
