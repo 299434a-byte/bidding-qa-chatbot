@@ -56,3 +56,9 @@
 - **计划**：关键词检索只走 FTS5。
 - **实现**：`backend/app/history.py` 用 `fts_available()` 探测本机 SQLite 是否编译了 FTS5；`search_messages()` 里 `use_fts` 为假或 FTS 查询报错时，回落到 `_search_like()` 用 `LIKE` 做模糊匹配。
 - **原因**：源码注释原文「LIKE 是全表扫描，速度不如 FTS，但保证『**搜索永远可用**』」。不同机器的 SQLite 编译差异不应让检索功能整体不可用，降级虽慢但不缺功能。
+
+## 8. LLM 重排：计划「候选够就一律重排」→ 实现「按需触发」（RERANK_MODE=auto）
+
+- **计划**：检索拿到候选后一律调大模型重排，把最相关的排到前面。
+- **实现**：`backend/app/rerank.py` 新增纯函数 `should_rerank(hits, settings)`，`rerank_hits` 按 `RERANK_MODE`（`auto` 默认 / `always` 保持旧逻辑 / `off` 关闭）决定排不排；metrics 增记 `rerank_skipped`。触发条件最终只留两条——① 头两名 **dense 分数并列**（相对差 < `RERANK_AUTO_GAP`，默认 0.1）② 融合第一名 dense 分 < `RERANK_AUTO_MIN_DENSE`（默认 0.35）。最初实现的「RRF 分差过小」与「dense 第一 ≠ bm25 第一」两条被实测砍掉：13 个真实问题上分别 13/13、12/13 恒触发（RRF 分是名次倒数之和、天然密集；两路召回集本就不同），留着等于 auto 永远重排。改后触发率 13 题里 4 题，恰好全是本集有标注、重排有收益的原文题。
+- **原因**：LLM 重排单次 8.7~13.1 秒，约一半请求在排队重排，实测首字延迟被拖到 6.9 秒、总耗时 16.6 秒。改为按需触发后，13 题首字中位数 **19.4 秒 → 0.7 秒**（详见 `backend/eval/report.md` 表 5）。代价如实记：`auto` 的 MRR 0.800 低于 `always` 的 1.000，差额全部来自 Q1——同一题两次重排结果相反（一次提到第 1、一次排到第 5），LLM 重排输出本身有随机性，不是「该排没排」；recall@5 无下降。
