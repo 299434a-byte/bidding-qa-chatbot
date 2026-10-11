@@ -106,6 +106,8 @@ export type MetricsSummary = {
   rerank_applied: number;
   /** 重排失败降级的次数 */
   rerank_failed: number;
+  /** 按需触发判定后主动跳过重排的次数 */
+  rerank_skipped: number;
   /** 重排成功率：成功 /（成功 + 失败），只统计真正尝试过重排的问答（0~1） */
   rerank_success_rate: number;
 };
@@ -266,6 +268,10 @@ export type RetrievalMeta = {
   rerank_model?: string | null;
   rerank_candidates?: number;
   rerank_error?: string | null;
+  /** 按需触发判定后是否主动跳过了重排（RERANK_MODE=auto/off，或候选不足） */
+  rerank_skipped?: boolean;
+  /** 跳过原因：mode_off / too_few_candidates / auto_order_reliable */
+  rerank_skip_reason?: string | null;
 };
 
 /** Agent 调用 PostgreSQL 工具后返回的查询详情（供前端展示 SQL 与结果表格） */

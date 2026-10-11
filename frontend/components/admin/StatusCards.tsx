@@ -54,6 +54,7 @@ export default function StatusCards({ health, kb, schema, metrics, metricsLocked
   // 缓存命中、候选不足没尝试的请求不进分母；一次都没试过时显示 —（灰点）。
   const rerankApplied = metrics?.rerank_applied ?? 0;
   const rerankFailed = metrics?.rerank_failed ?? 0;
+  const rerankSkipped = metrics?.rerank_skipped ?? 0;
   const rerankTried = rerankApplied + rerankFailed;
   const rerankRate = metrics?.rerank_success_rate ?? 0;
 
@@ -83,7 +84,7 @@ export default function StatusCards({ health, kb, schema, metrics, metricsLocked
           desc: metricsLocked
             ? "指标接口已收进门禁，登录后展示"
             : rerankTried > 0
-              ? `成功 ${rerankApplied} 次 · 失败降级 ${rerankFailed} 次`
+              ? `成功 ${rerankApplied} 次 · 失败降级 ${rerankFailed} 次 · 按需跳过 ${rerankSkipped} 次`
               : "尚无重排记录",
           tone: metricsLocked ? "off" : rerankTried === 0 ? "off" : rerankRate >= 0.5 ? "ok" : "err",
         },

@@ -60,6 +60,11 @@ RRF 是「位置融合」——它只看某条记录在某一路召回里排第�
 # 【注意事项】必须放在文件最顶部（所有执行代码之前），这是 Python 的硬性要求。
 from __future__ import annotations
 
+# 【这行在干什么】引入 logging（标准库）：跳过重排时打一行 debug 日志，便于排查「为什么没重排」。
+# 【为什么用 logging.getLogger(__name__)】模块级 logger 自动带上模块名（app.rerank），
+#   日志里一眼能看出是哪个模块写的；不用 print，方便按级别统一开关。
+import logging
+
 # 【这行在干什么】引入 json 模块（标准库，无需安装）。
 # 【为什么需要】要把大模型返回的那段文字「解析」成 Python 能操作的数据结构，
 #   这一步叫「反序列化」，靠 json.loads() 完成。
@@ -86,6 +91,9 @@ from .config import Settings, get_settings
 #   · LLMNotConfigured —— 「没配大模型」的专用异常（本文件捕获它→静默跳过重排）；
 #   · complete_chat —— 非流式调用函数，一次拿到完整回答（重排必须用非流式，见 llm.py 解释）。
 from .llm import LLMError, LLMNotConfigured, complete_chat
+
+# 【这行在干什么】创建本模块的 logger（名字自动是 app.rerank）。
+logger = logging.getLogger(__name__)
 
 # 【这行在干什么】定义「重排系统提示词」RERANK_SYSTEM_PROMPT——写给大模型的工作守则。
 # 【为什么这么重要】大模型很爱自由发挥：可能输出一大堆解释、可能把 JSON 包进 Markdown 代码块、
@@ -452,6 +460,68 @@ def parse_order(raw: str, n: int) -> list[int] | None:
     return order
 
 
+# 【这行在干什么】定义纯函数 should_rerank：判断「RRF 的顺序值不值得再花一次大模型调用去重排」。
+# 【为什么需要它（本轮的关键改动）】实测 LLM 重排单次 8.7~13.1 秒，而约一半请求都会走重排，
+#   把首字延迟拖到 6.9 秒。但 RRF 融合在「信号一致、分差明显」时给出的顺序本来就可靠，
+#   这类请求重排的收益≈0、成本却是十几秒。所以改为按需触发：顺序不可靠才重排。
+# 【三条触发条件（任一命中即值得重排）】
+#   ① 头两名 dense 分数并列 —— 语义相似度几乎打平，「谁排第一」接近抛硬币，顺序不可靠；
+#   ② 融合第一名的 dense 相似度过低 —— 最像的都只是「勉强像」，召回质量存疑；
+#   ③ 多路分歧 —— dense 第一名 ≠ bm25 第一名，两路各说各话，需要一个裁判。
+# 【实测后砍掉/换掉的条件（如实记录）】最初①用「RRF 分差过小」、③保留「多路分歧」，
+#   在 13 个真实问题上分别 13/13、12/13 恒触发，重排率没降下来（auto ≈ always）。
+#   根因：RRF 分是「名次倒数之和」，两路全第一≈0.0328、第二≈0.0322，天然密集，
+#   相对分差几乎总小于任何合理阈值；而 dense 与 bm25 两路召回集并不相同
+#   （不少候选只被一路命中），「两路第一名不同」是混合检索的常态，不是不确定信号。
+#   所以：① 换成看 dense 分数是否并列（真·难分难解才有重排价值），③ 整条砍掉。
+# 【为什么不用「候选数超过 N」当条件】候选多只是「池子大」，与顺序可不可靠无关；
+#   而且 rerank_hits 里已有 `len(hits) <= want_k` 的免排分支（没得挑就不排），
+#   再加一条「候选多就排」只会往反方向拉高重排率，与「省时间」的目标背道而驰。
+# 【纯函数承诺】只读 hits 的字段与 settings 的阈值，不碰网络、不碰大模型、不写任何状态，
+#   可离线单测（tests/test_rerank_trigger.py）。
+# 【参数逐个解释】
+#   · hits —— RRF 融合后的候选列表（每条含 rrf_score / scores / ranks / doc_id）；
+#   · settings —— 配置（读 rerank_auto_gap / rerank_auto_min_dense 两个阈值；可省）。
+# 【返回值】True = 值得重排；False = RRF 顺序已经够可靠，直接用。
+def should_rerank(hits: list[dict[str, Any]], settings: Settings | None = None) -> bool:
+    """判断这批候选的 RRF 顺序是否「不可靠到值得重排」（纯函数，可离线单测）。"""
+    # 【这行在干什么】确定用哪份配置（不传就用 .env 的，同 rerank_hits 的惯例）。
+    s = settings or get_settings()
+    # 【这行在干什么】候选不足 2 条时没有「顺序可争」的空间，不值得重排。
+    if len(hits) < 2:
+        return False
+
+    # ---------- 条件 ①：头两名 dense 分数并列 ----------
+    # 【为什么看 dense 而不是 RRF 分】RRF 分由名次决定、天然密集（见上方实测记录），
+    #   谁高谁低几乎分不出来；dense 是真正的相似度，0.72 vs 0.70 才叫并列、
+    #   0.85 vs 0.55 叫悬殊——这才是「顺序可不可靠」的有效信号。
+    # 【为什么要求两条都有 dense 分】候选常有「只被 bm25 命中」的（dense 分缺席），
+    #   那是关键词精确命中，语义并列与否无从谈起，不该据此触发。
+    dense1 = (hits[0].get("scores") or {}).get("dense")
+    dense2 = (hits[1].get("scores") or {}).get("dense")
+    if dense1 is not None and dense2 is not None:
+        d1, d2 = float(dense1), float(dense2)
+        # 【写法拆解】(d1 - d2) / d1 是「相对分差」：差值越悬殊越说明第一名稳。
+        # 【为什么 d1 > 0 要单独判】d1 是 0 分（异常数据）时除法会除零，直接跳过该条件。
+        if d1 > 0 and (d1 - d2) / d1 < s.rerank_auto_gap:
+            return True
+
+    # ---------- 条件 ②：融合第一名的 dense 相似度过低 ----------
+    # 【注意】第一名可能只被 bm25 命中（scores 里没有 dense 键）——关键词精确命中
+    #   本身就是强信号，此时不因「没有 dense 分」而触发重排。
+    dense_top = (hits[0].get("scores") or {}).get("dense")
+    if dense_top is not None and float(dense_top) < s.rerank_auto_min_dense:
+        return True
+
+    # ---------- 条件 ③（已砍掉）：多路分歧（dense 第一名 ≠ bm25 第一名） ----------
+    # 【为什么砍】实测 12/13 恒触发：dense 与 bm25 两路召回集本就不同（不少候选只被
+    #   一路命中），「第一名不是同一条」是混合检索的常态，不是「顺序不可靠」的信号。
+    #   留着它等于 auto 永远重排，与省时间的目标相反。上方文件头有完整实测记录。
+
+    # 条件都没命中：RRF 顺序已经够可靠，省下这 8~13 秒。
+    return False
+
+
 # 【这行在干什么】定义主函数 rerank_hits：对候选做二次排序，返回「结果 + 元信息」。
 # 【参数逐个解释】
 #   · question —— 用户问题（重排的判断依据）；
@@ -492,6 +562,12 @@ def rerank_hits(
         "rerank_candidates": len(hits),
         # 【这行在干什么】错误信息，初始为 None（没出错）。
         "rerank_error": None,
+        # 【重排按需触发】本轮是否「主动跳过」了重排（0/1 口径进指标；False = 不是被跳过的）。
+        #   与 rerank_applied / rerank_failed 三者互斥：同一问答只会有一个为真。
+        "rerank_skipped": False,
+        # 【重排按需触发】跳过原因（mode_off / too_few_candidates / auto_order_reliable），
+        #   没跳过时为 None。后台状态卡与 debug 日志都靠它回答「这次为什么没重排」。
+        "rerank_skip_reason": None,
     }
 
     # 【这行在干什么】如果压根没有候选，直接原样返回，不浪费一次大模型调用。
@@ -512,6 +588,28 @@ def rerank_hits(
     #   直接截断返回，省一次大模型调用（也省钱）。
     # 【举例】候选 4 条、要留 5 条 → 全留着就行，不需要知道先后顺序。
     if len(hits) <= want_k:
+        # 【重排按需触发】这也是一种「主动跳过」：没得挑就不排，记进指标与日志。
+        meta["rerank_skipped"] = True
+        meta["rerank_skip_reason"] = "too_few_candidates"
+        logger.debug("跳过重排：候选 %d 条 ≤ 目标 %d 条（too_few_candidates）", len(hits), want_k)
+        return hits[:want_k], meta
+
+    # ---------- 重排按需触发（RERANK_MODE 三态） ----------
+    # 【这行在干什么】读配置里的重排模式：auto（默认）/ always / off。
+    # 【为什么要这个开关（本轮核心改动）】LLM 重排单次 8.7~13.1 秒，旧逻辑是「候选够就一律排」，
+    #   约一半请求白白扛着十几秒的重排开销。auto 模式下只在 should_rerank 判定
+    #   「RRF 顺序不可靠」时才花这笔钱；always 保持旧行为（向后兼容、评测对比用）；
+    #   off 从不重排（纯基线）。
+    mode = (getattr(s, "rerank_mode", "auto") or "auto").lower()
+    if mode == "off":
+        meta["rerank_skipped"] = True
+        meta["rerank_skip_reason"] = "mode_off"
+        logger.debug("跳过重排：RERANK_MODE=off（mode_off）")
+        return hits[:want_k], meta
+    if mode == "auto" and not should_rerank(hits, s):
+        meta["rerank_skipped"] = True
+        meta["rerank_skip_reason"] = "auto_order_reliable"
+        logger.debug("跳过重排：RRF 顺序可靠（auto_order_reliable） candidates=%d", len(hits))
         return hits[:want_k], meta
 
     # 【这行在干什么】把实际要用的重排模型名写进 meta（供前端展示"用了哪个模型"）。
