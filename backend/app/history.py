@@ -105,6 +105,8 @@ from typing import Any, Iterator
 
 # 复用知识库那边的分词函数（jieba 分词），保证「历史搜索」与「知识库检索」口径一致。
 from .bm25 import tokenize
+# 【UTC 改造】timeutil：时间戳的写入与解析统一走它（存储/比较 UTC，老 naive 文本按东八区解释）。
+from . import timeutil
 # Settings/get_settings：读取 .env 配置（开关、库文件路径、各种长度上限）。
 from .config import Settings, get_settings
 
@@ -371,7 +373,11 @@ def fts_available(settings: Settings | None = None) -> bool:
 # 排序和做范围比较（"2026-09-29 10:00:00" 这种写法从小到大排就是时间顺序）。
 def _now() -> str:
     """本地时间字符串，与项目其它模块（日志、建库）保持一致。"""
-    return dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # 【UTC 改造】时间戳统一写 UTC 的 ISO 文本（带 +00:00 偏移）：
+    #   服务器 TZ=UTC 时，本地 now() 写下的时间与东八区相差 8 小时，
+    #   过期判断、TTL 计算会随之偏移。解析老的 naive 文本时按东八区解释，
+    #   保证历史数据继续有效（见 app/timeutil.py）。
+    return timeutil.now_iso()
 
 
 # _new_id：生成一个新记录的唯一 id（32 位十六进制字符串）。
@@ -661,7 +667,10 @@ def get_session_user(settings: Settings, token_hash: str) -> dict[str, Any] | No
     if row is None:
         return None
     # 字符串直接比大小即可判断过期（时间格式统一，字典序 == 时间序）。
-    if str(row["expires_at"]) <= _now():
+    # 【UTC 改造】改用 timeutil.is_past 做「解析后」的时刻比较：
+    #   新格式是 UTC ISO 文本、老格式是东八区 naive 文本，两种混存时字典序不再等于时间序，
+    #   必须先解析成感知型时间再比（解析不了按已过期处理，宁可要求重登也不放过期令牌）。
+    if timeutil.is_past(str(row["expires_at"])):
         # 过期就顺手删掉这条会话，减少垃圾数据。
         delete_session(settings, token_hash)
         return None
@@ -680,10 +689,17 @@ def delete_session(settings: Settings, token_hash: str) -> None:
 # 返回：删了几条。
 def purge_expired_sessions(settings: Settings) -> int:
     ensure_schema(settings)
+    # 【UTC 改造】过期判断改成「先解析、后比较」（timeutil.is_past）：
+    #   表里混存 UTC ISO 新文本与东八区 naive 老文本，SQL 里按字符串比大小会误判，
+    #   所以取回后在 Python 侧过滤，再删掉确实过期的那些（会话表很小，代价可忽略）。
     with _connect(settings) as conn, conn:
-        cur = conn.execute("DELETE FROM auth_sessions WHERE expires_at <= ?", (_now(),))
+        rows = conn.execute("SELECT token_hash, expires_at FROM auth_sessions").fetchall()
+        expired = [str(r["token_hash"]) for r in rows if timeutil.is_past(str(r["expires_at"]))]
+        if expired:
+            conn.executemany("DELETE FROM auth_sessions WHERE token_hash = ?", [(h,) for h in expired])
     # rowcount 是「这条 DELETE 影响的行数」。
-    return int(cur.rowcount or 0)
+    # 【UTC 改造】返回值改为上面 Python 侧统计的「确实过期并已删除」的条数（语义不变：删了几条）。
+    return len(expired)
 
 
 # --------------------------------------------------------------------------- #

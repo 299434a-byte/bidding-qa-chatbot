@@ -61,6 +61,9 @@ from typing import Any, Iterator
 
 # Settings/get_settings：读取 .env 配置（缓存库路径、TTL）。
 from .config import Settings, get_settings
+# kb_version：知识库版本指纹（缓存与知识库版本解耦的关键判据）。
+# 只读本地小文件、绝不开 Qdrant；读失败降级 "unknown"，详见 app/kb_version.py。
+from . import kb_version
 
 # 建表语句（DDL）。用 CREATE TABLE IF NOT EXISTS —— 「不存在才建」，所以反复执行也安全。
 # 【字段说明（大白话）】
@@ -70,6 +73,11 @@ from .config import Settings, get_settings
 #   sources_json —— 参考来源列表（JSON 文本），命中时能一并把「来源卡片」还原出来；
 #   mode         —— 结束模式（如 llm / agent_rag），命中时原样回放给前端；
 #   created_at   —— 写入时间（UTC 的 ISO 文本），用来判断是否超过 TTL。
+# 【kb_version 列（缓存与知识库版本解耦）】缓存的正确性依赖「答案是针对哪一版知识库」，
+#   知识库一重建旧答案就可能失效。所以每行都记下写入时的知识库版本指纹
+#   （见 app/kb_version.py），查询时用「cache_key 相同 且 kb_version 相同」双条件命中。
+#   主键仍是 cache_key（一问一行）：版本变后旧行查不到（版本对不上），
+#   下次同问再写入会 INSERT OR REPLACE 覆盖掉旧行 —— 不会残留旧版本垃圾行。
 _DDL = """
 CREATE TABLE IF NOT EXISTS answer_cache (
     cache_key    TEXT PRIMARY KEY,
@@ -77,9 +85,15 @@ CREATE TABLE IF NOT EXISTS answer_cache (
     answer       TEXT NOT NULL,
     sources_json TEXT NOT NULL DEFAULT '[]',
     mode         TEXT NOT NULL DEFAULT 'llm',
-    created_at   TEXT NOT NULL
+    created_at   TEXT NOT NULL,
+    kb_version   TEXT NOT NULL DEFAULT 'unknown'
 );
 """
+
+# 【已有老库的兜底】老版本建的 answer_cache 表没有 kb_version 列，
+# ALTER TABLE 补一列（默认 'unknown'）；老行版本为 unknown，天然与任何真实版本对不上
+# → 知识库升级后老缓存自动全部不命中（安全侧：宁可重算，不用旧答案）。
+_ALTER_ADD_KB_VERSION = "ALTER TABLE answer_cache ADD COLUMN kb_version TEXT NOT NULL DEFAULT 'unknown'"
 
 # 建表只需做一次；按库文件的绝对路径记录，避免每次请求都跑一遍 DDL。
 # 【为什么用「集合」】它天然去重（同一个路径写两遍也只算一个），判断「建过没」也快。
@@ -177,6 +191,40 @@ def is_cacheable(
     return True
 
 
+def is_cache_readable(
+    *,
+    logged_in: bool,
+    mode: str = "react",
+    has_image: bool = False,
+    question: str = "",
+) -> bool:
+    """读缓存的准绳（写入侧仍用 :func:`is_cacheable` —— 读写两把尺子刻意不对称）。
+
+    【为什么读写不对称（缓存命中率修复，2026-10）】实测 cache_hit_rate 只有 2.4%，
+    排查发现两道闸门把「明明该命中」的请求全拦了：
+
+      · ``has_history`` 不拦读 —— 写入侧照旧拒绝「带历史生成」的答案（那份答案依赖
+        上下文，不能当标准答案存起来），所以缓存里只可能是「无历史、独立成问」的答案；
+        问题文本精确命中拿到的就是该问题的标准答案，带历史把同一句话再问一遍时
+        直接复用即可。旧行为是「带历史一律不读不写」，结果 UI 多轮对话永远不命中。
+      · ``web_search`` 不拦读 —— 写入侧只拒绝「答案里真的用了联网结果」的写入
+        （时效性顾虑只对含联网内容的答案成立）。缓存里的答案永远不含联网内容，
+        读出来不存在「一小时前的搜索结果」问题。旧行为是「允许联网就不读不写」，
+        而 WEB_SEARCH_DEFAULT=true 的环境里所有请求都被误杀（实测第二问仍 45.9s）。
+
+    仍然拦下的（与 is_cacheable 保持一致）：未登录 / deep 模式 / 带图片 / 疑似敏感。
+    """
+    if not logged_in:
+        return False
+    if mode == "deep":
+        return False
+    if has_image:
+        return False
+    if looks_sensitive(question):
+        return False
+    return True
+
+
 # 把「打开连接 / 用完关闭」包装成上下文管理器。
 # 用法：`with _connect(settings) as conn:` —— 进入时开连接，离开时自动关（异常也不会漏关）。
 @contextmanager
@@ -214,6 +262,12 @@ def _ensure_schema(conn: sqlite3.Connection, path: Path) -> None:
             return
         # 执行建表语句（IF NOT EXISTS，重复执行也无害）。
         conn.execute(_DDL)
+        # 【老库兜底】表已存在但缺 kb_version 列（老版本建的表）时补一列。
+        # PRAGMA table_info 列出全部列名；没有 kb_version 就 ALTER TABLE 加上。
+        # ALTER 语句本身对新库无害：新库建表时已有该列，这里不会执行到。
+        cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(answer_cache)")}
+        if "kb_version" not in cols:
+            conn.execute(_ALTER_ADD_KB_VERSION)
         conn.commit()
         # 记下「这个库已经建过表」。
         _schema_ready.add(key)
@@ -253,10 +307,12 @@ def get_cached(question: str, settings: Settings | None = None) -> dict[str, Any
         # 打开连接并确保表存在。
         with _connect(s) as conn:
             _ensure_schema(conn, s.cache_db_path)
-            # 按主键取一条。
+            # 按「主键 + 知识库版本」取一条：版本对不上的一律当未命中
+            # （知识库重建/更新后旧答案立即失效，见文件头与 app/kb_version.py）。
             row = conn.execute(
-                "SELECT question, answer, sources_json, mode, created_at FROM answer_cache WHERE cache_key = ?",
-                (key,),
+                "SELECT question, answer, sources_json, mode, created_at "
+                "FROM answer_cache WHERE cache_key = ? AND kb_version = ?",
+                (key, kb_version.kb_version(s)),
             ).fetchone()
         # 查不到 → 未命中。
         if row is None:
@@ -304,14 +360,34 @@ def set_cached(
         with _connect(s) as conn:
             _ensure_schema(conn, s.cache_db_path)
             # INSERT OR REPLACE：主键已存在就覆盖（等价于「更新」）。
+            # kb_version 记下「这份答案是针对哪一版知识库」，查询时按版本命中。
             conn.execute(
-                "INSERT OR REPLACE INTO answer_cache (cache_key, question, answer, sources_json, mode, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (key, question, answer, sources_json, mode or "llm", _now_iso()),
+                "INSERT OR REPLACE INTO answer_cache "
+                "(cache_key, question, answer, sources_json, mode, created_at, kb_version) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (key, question, answer, sources_json, mode or "llm", _now_iso(), kb_version.kb_version(s)),
             )
             # 提交事务（不提交的话数据不会真正落盘）。
             conn.commit()
         return True
     except Exception:
         # 【关键】写失败静默吞掉。
+        return False
+
+
+def clear(settings: Settings | None = None) -> bool:
+    """手动清空全部问答缓存。成功返回 True；失败静默返回 False（不影响问答）。
+
+    【什么时候用】版本机制已让「知识库一变、旧缓存自动失效」，平时不需要清；
+    这里提供的是运维兜底（比如怀疑缓存内容有问题时一键清空）。
+    """
+    s = settings or get_settings()
+    try:
+        with _connect(s) as conn:
+            _ensure_schema(conn, s.cache_db_path)
+            conn.execute("DELETE FROM answer_cache")
+            conn.commit()
+        return True
+    except Exception:
+        # 【静默降级】清不掉也不该影响问答主流程。
         return False

@@ -50,6 +50,7 @@ backend/data/*.db-journal
 backend/data/*.db-wal
 backend/data/*.db-shm
 backend/data/*.log
+backend/data/*.log.*
 
 # ---------------------------- AI 协作过程文档（不适合对外展示） ----------------------------
 .trae/

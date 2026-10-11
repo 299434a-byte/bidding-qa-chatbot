@@ -4,6 +4,8 @@ import { memo, useMemo, useRef, useState } from "react";
 import Icon from "@/components/ui/icons";
 import ToolTrace from "@/components/chat/ToolTrace";
 import { mdToHtml } from "@/lib/markdown";
+// 【展示本地化】消息时刻按东八区展示（实现见 lib/timefmt.ts），与历史列表的时间口径一致。
+import { formatHm } from "@/lib/timefmt";
 import type {
   CitationIssue,
   GraphQueryInfo,
@@ -128,10 +130,8 @@ function toolLabel(name: string): string {
 }
 
 function fmtTime(ts?: number | null): string {
-  if (!ts) return "";
-  const d = new Date(ts);
-  const p = (n: number) => String(n).padStart(2, "0");
-  return `${p(d.getHours())}:${p(d.getMinutes())}`;
+  // 【展示本地化】原先用浏览器本地时区的 getHours()；统一改为 lib/timefmt 的东八区展示。
+  return formatHm(ts);
 }
 
 function MessageBubble({ msg, highlighted, busy, onFillInput, onAdopt, onOpenEvidence, onRegenerate, onToast }: Props) {

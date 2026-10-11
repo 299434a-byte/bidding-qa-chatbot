@@ -244,6 +244,10 @@ from . import metrics as metrics_store
 # 【日志】setup_logging 统一配置日志的输出位置与格式；get_logger 取一个日志器。
 from .logging_setup import get_logger, setup_logging
 
+# 【缓存与知识库版本解耦】kb_version：知识库版本指纹，/api/health 回显它，
+# 便于排查「为什么答的是旧内容」（对比缓存写入时的版本与当前版本）。
+from .kb_version import kb_version
+
 # 创建 FastAPI 应用本体（就是 uvicorn 启动时导入的那个 app）。
 # title / description / version 只影响自动生成的接口文档页（/docs）上显示的说明。
 app = FastAPI(
@@ -408,6 +412,9 @@ class _EventCollector:
         # 本轮重排是否「尝试过但失败降级」（来自 retrieval meta 的 rerank_error）。
         # 与 rerank_applied 一起构成「重排成功率」的两个计数口径；默认 False。
         self.rerank_failed = False
+        # 本轮是否「按需触发判定后主动跳过重排」（来自 retrieval meta 的 rerank_skipped）。
+        # 与上面两个互斥，共同回答「这次到底重排了没有、为什么」。
+        self.rerank_skipped = False
         # PostgreSQL 查询信息（SQL 文本、返回行数、是否出错）；没查过就是 None。
         self.sql: dict[str, Any] | None = None
         # Neo4j 图谱查询信息（Cypher 文本、返回行数、是否出错）；没查过就是 None。
@@ -448,6 +455,7 @@ class _EventCollector:
             meta = event.get("meta") or {}
             self.rerank_applied = bool(meta.get("rerank_applied"))
             self.rerank_failed = bool(meta.get("rerank_error"))
+            self.rerank_skipped = bool(meta.get("rerank_skipped"))
         # 参考来源事件：直接整体保存（`or []` 保证即使上游给 None 也存成空列表，
         # 避免后面遍历时对 None 报错）。
         elif etype == "sources":
@@ -707,6 +715,10 @@ def health() -> dict[str, Any]:
         "index": store_stats,
         # 当前是否正在重建知识库（前端据此禁用「重建」按钮并显示进度）。
         "ingesting": _ingest_state["running"],
+        # 知识库版本指纹（8~12 位短 hash，见 app/kb_version.py）。
+        # 【为什么要暴露】问答缓存按它判失效：排查「为什么答的是旧内容」时，
+        # 先看这里的版本与 data/kb_version.txt 是否对得上，再看缓存行里的版本。
+        "kb_version": kb_version(s),
     }
 
 
@@ -1458,6 +1470,7 @@ def _finalize_qa(
     cache_hit: bool,
     rerank_applied: bool,
     rerank_failed: bool = False,
+    rerank_skipped: bool = False,
 ) -> None:
     """问答收尾的统一动作：记一条指标 + 打一行日志（两个问答入口共用）。
 
@@ -1473,7 +1486,8 @@ def _finalize_qa(
       · sources_count  —— 引用来源条数；
       · cache_hit      —— 是否命中缓存；
       · rerank_applied —— 是否应用了重排；
-      · rerank_failed  —— 重排是否「尝试过但失败降级」（默认 False；缓存命中走不到重排）。
+      · rerank_failed  —— 重排是否「尝试过但失败降级」（默认 False；缓存命中走不到重排）；
+      · rerank_skipped —— 是否「按需触发判定后主动跳过重排」（默认 False）。
 
     【硬要求：静默降级】记指标失败绝不影响问答（metrics.record 内部已兜底）；
     日志是标准库 logging，写日志本身设计上不会抛异常影响主流程。
@@ -1489,6 +1503,7 @@ def _finalize_qa(
         cache_hit=cache_hit,
         rerank_applied=rerank_applied,
         rerank_failed=rerank_failed,
+        rerank_skipped=rerank_skipped,
         settings=settings,
     )
     # 打一行汇总日志：包含「收到提问 / 本次耗时 / 命中缓存」三项关键信息。
@@ -1536,8 +1551,15 @@ def chat(
         has_image=False,
         question=payload.question,
     )
-    # 【先查缓存】可缓存才查；命中拿到答案字典，未命中/出错一律 None（静默降级）。
-    cached = answer_cache.get_cached(payload.question, s) if cacheable else None
+    # 【先查缓存】读缓存走「读准绳」is_cache_readable（与写准绳刻意不对称，见该函数 docstring）；
+    # 命中拿到答案字典，未命中/出错一律 None（静默降级）。写入仍用上面的 cacheable。
+    cached = (
+        answer_cache.get_cached(payload.question, s)
+        if answer_cache.is_cache_readable(
+            logged_in=logged_in, mode="llm", has_image=False, question=payload.question
+        )
+        else None
+    )
 
     # 定义内部「事件流」函数（闭包：能访问外层 payload、s）。
     # 【生成器】函数体里出现 yield 的函数就是生成器：每执行到 yield 就「吐」出一个值，
@@ -1557,6 +1579,9 @@ def chat(
         # 【为什么要单独记】重排失败后静默退回 RRF 原序，回答照常；不记这一笔，
         # /api/metrics 就只能看到「应用率」，永远发现不了「总在失败」的重排。
         rerank_failed = False
+        # 本轮是否「按需触发判定后主动跳过重排」：retrieval meta 里带 rerank_skipped 即算。
+        # 与 rerank_applied / rerank_failed 互斥，三者一起回答「这次到底重排了没有、为什么」。
+        rerank_skipped = False
 
         # ---------------- 情况一：缓存命中，直接回放 ----------------
         if cached is not None:
@@ -1601,6 +1626,7 @@ def chat(
                     meta = event.get("meta") or {}
                     rerank_applied = bool(meta.get("rerank_applied"))
                     rerank_failed = bool(meta.get("rerank_error"))
+                    rerank_skipped = bool(meta.get("rerank_skipped"))
                 elif etype == "done":
                     done_mode = event.get("mode") or done_mode
                 # 原样转发给前端。
@@ -1627,6 +1653,7 @@ def chat(
             cache_hit=False,
             rerank_applied=rerank_applied,
             rerank_failed=rerank_failed,
+            rerank_skipped=rerank_skipped,
         )
         # SSE 协议规定：流结束时发一行 [DONE] 表示「到此为止」。
         yield "data: [DONE]\n\n"
@@ -1718,8 +1745,16 @@ async def agent_chat(
         has_image=False,
         question=payload.question,
     )
-    # 【先查缓存】可缓存才查；命中拿到答案字典，未命中/出错一律 None（静默降级）。
-    cached = answer_cache.get_cached(payload.question, s) if cacheable else None
+    # 【先查缓存】读缓存走「读准绳」is_cache_readable（与写准绳刻意不对称，见该函数 docstring）：
+    # 带历史 / 允许联网不再拦「读」——缓存里只可能是无历史、未联网的标准答案，精确命中即可复用。
+    # 命中拿到答案字典，未命中/出错一律 None（静默降级）。写入侧的准绳在收尾处按「是否真联网」重算。
+    cached = (
+        answer_cache.get_cached(payload.question, s)
+        if answer_cache.is_cache_readable(
+            logged_in=bool(user), mode=mode, has_image=False, question=payload.question
+        )
+        else None
+    )
 
     # 事件流生成器（async 版）。带 yield 的 async 函数是「异步生成器」，
     # 调用方要用 `async for` 遍历，正好符合这里「一边产出、一边被 StreamingResponse 取走」的需求。
@@ -1881,10 +1916,24 @@ async def agent_chat(
                 # 这里连状态都不用标记：落库失败对用户已收到的回答毫无影响，静默即可。
                 pass
 
+        # 【写缓存前修正 web 口径（缓存命中率修复）】cacheable 是请求开头按「是否允许联网」
+        # 预判的（宁可保守）；联网内容的时效性顾虑只对「真的用了联网结果」的答案成立。
+        # 允许联网但本轮没用（collector.web 为 None）→ 答案是纯知识库答案，无时效性问题
+        # → 把当初被误否决的可缓存判定按 web_search=False 重算一遍（其余闸门照旧）。
+        writable = cacheable
+        if not writable and use_web and collector.web is None:
+            writable = answer_cache.is_cacheable(
+                logged_in=bool(user),
+                mode=mode,
+                has_history=bool(history),
+                web_search=False,
+                has_image=False,
+                question=payload.question,
+            )
         # 【done 之后写缓存】仅在「可缓存 + 未断线 + 有实际正文」时写。
         # 【为什么要求未断线】断线时正文可能是残缺的，缓存残缺答案会误导后续用户。
         # 写失败静默（answer_cache 内部已兜底），绝不打断已完成的问答。
-        if cacheable and not disconnected and answer:
+        if writable and not disconnected and answer:
             answer_cache.set_cached(
                 payload.question, answer, collector.sources, collector.done_mode or mode, s
             )
@@ -1900,6 +1949,7 @@ async def agent_chat(
             cache_hit=False,
             rerank_applied=collector.rerank_applied,
             rerank_failed=collector.rerank_failed,
+            rerank_skipped=collector.rerank_skipped,
         )
 
         # 同 /api/chat：流末尾发 [DONE] 表示结束。

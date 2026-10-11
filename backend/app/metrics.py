@@ -57,6 +57,7 @@ from .config import Settings, get_settings
 #   cache_hit      —— 是否命中缓存（0/1，SQLite 没有专门的布尔类型，用整数表示）；
 #   rerank_applied —— 本次是否应用了重排（0/1）；
 #   rerank_failed  —— 本次是否「尝试了重排但失败降级」（0/1），与 applied 互斥；
+#   rerank_skipped —— 本次是否「按需触发判定后主动跳过重排」（0/1），与 applied/failed 互斥；
 #   created_at     —— 记录时间（UTC 的 ISO 文本）。
 _DDL = """
 CREATE TABLE IF NOT EXISTS qa_metrics (
@@ -68,6 +69,7 @@ CREATE TABLE IF NOT EXISTS qa_metrics (
     cache_hit      INTEGER NOT NULL DEFAULT 0,
     rerank_applied INTEGER NOT NULL DEFAULT 0,
     rerank_failed  INTEGER NOT NULL DEFAULT 0,
+    rerank_skipped INTEGER NOT NULL DEFAULT 0,
     created_at     TEXT NOT NULL
 );
 """
@@ -120,6 +122,14 @@ def _ensure_schema(conn: sqlite3.Connection, path: Path) -> None:
         except Exception:
             # 【静默】列已存在，说明这轮不用补，忽略即可。
             pass
+        # 【存量库补列】同上：老表没有 rerank_skipped 列时补一列（新库建表时已带）。
+        try:
+            conn.execute(
+                "ALTER TABLE qa_metrics ADD COLUMN rerank_skipped INTEGER NOT NULL DEFAULT 0"
+            )
+        except Exception:
+            # 【静默】列已存在，忽略。
+            pass
         conn.commit()
         _schema_ready.add(key)
 
@@ -138,6 +148,7 @@ def record(
     cache_hit: bool = False,
     rerank_applied: bool = False,
     rerank_failed: bool = False,
+    rerank_skipped: bool = False,
     settings: Settings | None = None,
 ) -> bool:
     """记一条问答指标。成功返回 ``True``；任何失败静默返回 ``False``。
@@ -149,7 +160,8 @@ def record(
       · sources_count  —— 引用来源条数；
       · cache_hit      —— 是否命中缓存；
       · rerank_applied —— 是否应用了重排；
-      · rerank_failed  —— 是否「尝试了重排但失败降级」（静默降级也得留痕，否则永远看不见）。
+      · rerank_failed  —— 是否「尝试了重排但失败降级」（静默降级也得留痕，否则永远看不见）；
+      · rerank_skipped —— 是否「按需触发判定后主动跳过重排」（与 applied/failed 互斥）。
 
     【为什么整个函数包 try/except（对应硬要求）】
       记指标是「旁路统计」。万一磁盘满了、库被锁了，也只是「这条统计丢了」，
@@ -163,8 +175,8 @@ def record(
             conn.execute(
                 "INSERT INTO qa_metrics "
                 "(mode, elapsed_ms, first_token_ms, sources_count, cache_hit, "
-                "rerank_applied, rerank_failed, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "rerank_applied, rerank_failed, rerank_skipped, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     mode or "llm",
                     # 耗时统一取「非负浮点」；传进来 None/负数时兜底成 0。
@@ -176,6 +188,7 @@ def record(
                     1 if cache_hit else 0,
                     1 if rerank_applied else 0,
                     1 if rerank_failed else 0,
+                    1 if rerank_skipped else 0,
                     _now_iso(),
                 ),
             )
@@ -200,6 +213,7 @@ def summary(settings: Settings | None = None) -> dict[str, Any]:
       · ``rerank_applied_rate`` —— 重排应用率（0~1 的小数，保留四位）；
       · ``rerank_applied``      —— 重排成功的次数（计数）；
       · ``rerank_failed``       —— 重排失败降级的次数（计数）；
+      · ``rerank_skipped``      —— 按需触发判定后主动跳过重排的次数（计数）；
       · ``rerank_success_rate`` —— 重排成功率 = 成功 /（成功 + 失败），
         分母只算「真正尝试过重排」的问答；一次都没尝试的请求不进分母。
     """
@@ -215,6 +229,7 @@ def summary(settings: Settings | None = None) -> dict[str, Any]:
         "rerank_applied_rate": 0.0,
         "rerank_applied": 0,
         "rerank_failed": 0,
+        "rerank_skipped": 0,
         "rerank_success_rate": 0.0,
     }
     # 【静默降级】读指标失败时返回空统计（接口照常可用，只是数字是 0）。
@@ -237,7 +252,8 @@ def summary(settings: Settings | None = None) -> dict[str, Any]:
                 "COALESCE(AVG(first_token_ms), 0) AS avg_first_token, "
                 "COALESCE(SUM(cache_hit), 0) AS hits, "
                 "COALESCE(SUM(rerank_applied), 0) AS reranks, "
-                "COALESCE(SUM(rerank_failed), 0) AS rerank_fails "
+                "COALESCE(SUM(rerank_failed), 0) AS rerank_fails, "
+                "COALESCE(SUM(rerank_skipped), 0) AS rerank_skips "
                 "FROM qa_metrics"
             ).fetchone()
             # 按模式分组计数（例如 llm 有多少次、cache 有多少次）。
@@ -268,6 +284,7 @@ def summary(settings: Settings | None = None) -> dict[str, Any]:
             "rerank_applied_rate": rerank_applied_rate,
             "rerank_applied": reranks,
             "rerank_failed": rerank_fails,
+            "rerank_skipped": int(row["rerank_skips"] or 0),
             "rerank_success_rate": rerank_success_rate,
         }
     except Exception:

@@ -2,6 +2,9 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { api, type Conversation, type HistoryHit, type User } from "@/lib/api";
+// 【展示本地化】时间列不再直接截断字符串：库里的 UTC 时间戳要解析后换算成东八区展示
+// （历史 naive 文本按东八区解释），实现见 lib/timefmt.ts。
+import { shortTime } from "@/lib/timefmt";
 
 /**
  * 对话历史面板（主对话页左栏专用）：新建对话 + 关键词检索 + 会话列表 + 重命名 / 删除。
@@ -35,10 +38,8 @@ const MODE_LABELS: Record<string, string> = {
   deep: "深度思考",
 };
 
-/** 把后端返回的时间戳截成「YYYY-MM-DD HH:mm」 */
-function shortTime(value: string): string {
-  return (value ?? "").replace("T", " ").slice(0, 16);
-}
+/** 【展示本地化】shortTime 已上提到 lib/timefmt.ts：解析 UTC/老 naive 文本后按东八区格式化为「YYYY-MM-DD HH:mm」。 */
+
 
 export default function HistoryPanel({ enabled, user, onOpenConversation, onNewConversation, refreshKey }: Props) {
   const [items, setItems] = useState<Conversation[]>([]);

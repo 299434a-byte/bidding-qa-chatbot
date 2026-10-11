@@ -91,6 +91,9 @@ import threading
 import time
 # datetime/timedelta：计算令牌的过期时间点。
 from datetime import datetime, timedelta
+# 【UTC 改造】timeutil：统一的时间取值/解析工具。存储与比较一律 UTC，
+# 历史 naive 文本按东八区解释（详见 app/timeutil.py 文件头说明）。
+from . import timeutil
 # 只用于类型标注的 Any。
 from typing import Any
 
@@ -216,7 +219,10 @@ def issue_token(settings: Settings, user_id: str, user_agent: str | None) -> str
     # 生成 32 字节的随机令牌，urlsafe 表示用「URL 安全字符」，可安全放进请求头/链接。
     raw = secrets.token_urlsafe(32)
     # 计算过期时间点：现在 + 有效期天数，格式化成 "年-月-日 时:分:秒" 的字符串。
-    expires_at = (datetime.now() + timedelta(days=settings.auth_token_ttl_days)).strftime("%Y-%m-%d %H:%M:%S")
+    # 【UTC 改造】过期时间改为「UTC 的 ISO 文本」（带 +00:00 偏移）：
+    #   服务器 TZ=UTC 时本地 now() 会与东八差 8 小时，过期判断随之偏移；
+    #   统一用 now_utc() 写、用 timeutil.parse_ts 读（老的 naive 文本按东八区解释）。
+    expires_at = (timeutil.now_utc() + timedelta(days=settings.auth_token_ttl_days)).isoformat()
     # 落库：存哈希（不是明文）、所属用户、过期时间、设备信息。
     history.create_session(settings, _hash_token(raw), user_id, expires_at, user_agent)
     # 明文只在这返回一次。

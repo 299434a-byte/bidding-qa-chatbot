@@ -23,6 +23,9 @@ import {
   type PlanStepRun,
   type User,
 } from "@/lib/api";
+// 【展示本地化】历史消息的 created_at 用 parseTs 解析（UTC ISO / 老 naive 文本按东八区），
+// 再交给展示层格式化；解析失败按无时间处理。
+import { parseTs } from "@/lib/timefmt";
 
 const uid = () => Math.random().toString(36).slice(2, 10);
 
@@ -195,7 +198,7 @@ export default function Home() {
             id: item.id,
             role: "user" as const,
             content: item.content,
-            ts: item.created_at ? Date.parse(item.created_at.replace(" ", "T")) || null : null,
+            ts: item.created_at ? parseTs(item.created_at)?.getTime() ?? null : null,
           };
         }
         const meta = item.meta;
@@ -209,7 +212,7 @@ export default function Home() {
           id: item.id,
           role: "assistant" as const,
           content: item.content,
-          ts: item.created_at ? Date.parse(item.created_at.replace(" ", "T")) || null : null,
+          ts: item.created_at ? parseTs(item.created_at)?.getTime() ?? null : null,
           mode: meta?.done_mode ?? meta?.mode ?? res.conversation.mode,
           toolCalls,
           sources: meta?.sources,

@@ -102,6 +102,9 @@ from .vector_store import get_store, text_hash
 # 【日志】用标准库 logging 取代原来的 print：带时间/级别/模块前缀，
 # 且能同时输出到控制台与 backend/data/app.log 文件（配置见 logging_setup.py）。
 from .logging_setup import get_logger
+# 【缓存与知识库版本解耦】kb_version：建库成功后写 data/kb_version.txt，
+# 让问答缓存的版本指纹跟着知识库走（详见 app/kb_version.py）。
+from .kb_version import write_kb_version
 
 # 本模块的日志器（名字形如 "app.ingest"）。
 logger = get_logger(__name__)
@@ -539,6 +542,16 @@ def run_ingest(
     report("done", f"建库完成，耗时 {summary['elapsed']} 秒")
     # 【这行在干什么】把整份报告返回给调用方（命令行模式下会被打印出来；
     #   接口模式下会被包装成 JSON 返回给前端）。
+    # 【缓存与知识库版本解耦】全量建库成功：写 data/kb_version.txt（ISO 时间 + 点数 + 差集数字）。
+    # 文件内容一变，kb_version 指纹就变，问答缓存里针对旧知识库的答案全部自动失效
+    # （不需要显式 clear；answer_cache 查询时以 kb_version 为必要条件）。
+    write_kb_version(
+        s,
+        points=summary.get("points"),
+        added=summary.get("added"),
+        updated=summary.get("updated"),
+        deleted=summary.get("deleted"),
+    )
     return summary
 
 
@@ -698,6 +711,15 @@ def run_incremental(
     summary["empty"] = summary["documents"] == 0
     summary["elapsed"] = round(time.time() - started, 2)
     report("done", f"增量更新完成，耗时 {summary['elapsed']} 秒")
+    # 【缓存与知识库版本解耦】增量更新成功：写 data/kb_version.txt（ISO 时间 + 点数 + 差集数字）。
+    # 文件内容一变，kb_version 指纹就变，问答缓存里针对旧知识库的答案全部自动失效。
+    write_kb_version(
+        s,
+        points=summary.get("points"),
+        added=summary.get("added"),
+        updated=summary.get("updated"),
+        deleted=summary.get("deleted"),
+    )
     return summary
 
 

@@ -373,6 +373,17 @@ class Settings:
     #   会导致「静默降级」（悄悄退回 RRF 顺序、用户以为重排生效了）。
     #   45 秒是实测能稳定完成的经验值，属硬约束，不要随意调小。
     rerank_timeout: int
+    # 【重排按需触发】RERANK_MODE = auto | always | off（默认 auto）；从 RERANK_MODE 读。
+    #   auto   —— 只在「RRF 顺序不可靠」时才花一次大模型调用去重排（见 rerank.should_rerank）；
+    #   always —— 保持旧行为：候选够多就一律重排（向后兼容，评测对比用）；
+    #   off    —— 从不重排，直接用 RRF 顺序（纯基线，评测对比用）。
+    rerank_mode: str
+    # 【重排按需触发·阈值一】RRF 头两名的「相对分差」低于该值才算顺序不可靠（默认 0.1）。
+    #   相对分差 = (top1 - top2) / top1；RRF 分是名次倒数之和，量纲固定，适合用相对差。
+    rerank_auto_gap: float
+    # 【重排按需触发·阈值二】融合第一名的 dense 相似度低于该值才算「召回质量存疑」（默认 0.35）。
+    #   0.35 与 DENSE_MIN_SCORE 的推荐门槛一致（见上面 dense_min_score 注释）。
+    rerank_auto_min_dense: float
 
     # 【这行在干什么】纯注释，标出下面一组字段属于「长文本切块」配置。
     # 切块
@@ -796,6 +807,9 @@ def _build_settings() -> Settings:
         rerank_model=_str("RERANK_MODEL"),
         rerank_max_chars=_int("RERANK_MAX_CHARS", 300),
         rerank_timeout=_int("RERANK_TIMEOUT", 45),
+        rerank_mode=_str("RERANK_MODE", "auto").lower(),
+        rerank_auto_gap=_float("RERANK_AUTO_GAP", 0.1),
+        rerank_auto_min_dense=_float("RERANK_AUTO_MIN_DENSE", 0.35),
         # ---------------- 切块 ---------------- #
         max_doc_chars=_int("MAX_DOC_CHARS", 1200),
         chunk_size=_int("CHUNK_SIZE", 500),

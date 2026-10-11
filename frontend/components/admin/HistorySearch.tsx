@@ -2,6 +2,9 @@
 
 import { useState } from "react";
 import { api, type HistoryHit, type User } from "@/lib/api";
+// 【展示本地化】时间列不再直接截断字符串：库里的 UTC 时间戳要解析后换算成东八区展示
+// （历史 naive 文本按东八区解释），实现见 lib/timefmt.ts。
+import { shortTime } from "@/lib/timefmt";
 
 /**
  * 历史检索（后台页专用）：关键词 + 日期范围 + 模式 三个维度的完整检索，
@@ -26,10 +29,8 @@ const MODE_LABELS: Record<string, string> = {
   deep: "深度思考",
 };
 
-/** 把后端返回的时间戳截成「YYYY-MM-DD HH:mm」 */
-function shortTime(value: string): string {
-  return (value ?? "").replace("T", " ").slice(0, 16);
-}
+/** 【展示本地化】shortTime 已上提到 lib/timefmt.ts：解析 UTC/老 naive 文本后按东八区格式化为「YYYY-MM-DD HH:mm」。 */
+
 
 export default function HistorySearch({ user }: Props) {
   const [q, setQ] = useState("");
