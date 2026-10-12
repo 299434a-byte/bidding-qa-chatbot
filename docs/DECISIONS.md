@@ -62,3 +62,27 @@
 - **计划**：检索拿到候选后一律调大模型重排，把最相关的排到前面。
 - **实现**：`backend/app/rerank.py` 新增纯函数 `should_rerank(hits, settings)`，`rerank_hits` 按 `RERANK_MODE`（`auto` 默认 / `always` 保持旧逻辑 / `off` 关闭）决定排不排；metrics 增记 `rerank_skipped`。触发条件最终只留两条——① 头两名 **dense 分数并列**（相对差 < `RERANK_AUTO_GAP`，默认 0.1）② 融合第一名 dense 分 < `RERANK_AUTO_MIN_DENSE`（默认 0.35）。最初实现的「RRF 分差过小」与「dense 第一 ≠ bm25 第一」两条被实测砍掉：13 个真实问题上分别 13/13、12/13 恒触发（RRF 分是名次倒数之和、天然密集；两路召回集本就不同），留着等于 auto 永远重排。改后触发率 13 题里 4 题，恰好全是本集有标注、重排有收益的原文题。
 - **原因**：LLM 重排单次 8.7~13.1 秒，约一半请求在排队重排，实测首字延迟被拖到 6.9 秒、总耗时 16.6 秒。改为按需触发后，13 题首字中位数 **19.4 秒 → 0.7 秒**（详见 `backend/eval/report.md` 表 5）。代价如实记：`auto` 的 MRR 0.800 低于 `always` 的 1.000，差额全部来自 Q1——同一题两次重排结果相反（一次提到第 1、一次排到第 5），LLM 重排输出本身有随机性，不是「该排没排」；recall@5 无下降。
+
+## 9. 问答缓存 key：计划「只按规范化问题」→ 实现「问题 + mode + top_k」
+
+- **计划**：缓存主键只用规范化后的问题文本（第 5 条的精确匹配方案）。
+- **实现**：`answer_cache` 的 `cache_key` 在问题之外，追加 **`mode`（react / plan 等）与影响答案的检索参数（如 `top_k`）**；写入侧 `set_cached` 与读取侧 `get_cached` 共用同一套 key 构造逻辑。老 key 不迁移、自然过期失效。同时修掉一处 fail-open：`created_at` 解析失败时原实现跳过 TTL 检查当命中返回，现改为**按未命中返回并记 warning**（与「读失败一律当没缓存」的既定原则对齐）。
+- **原因**：同一问题在不同 `mode` 下走的是不同链路、答案不同（react 与 plan 互相命中等于**串答案**——命中错比不命中更致命，与第 5 条同一价值观）；`top_k` 变化会改变进入答案的资料，也必须分键。fail-open 反过来让「解析不了的脏行」被当成长期有效缓存，与「失败即当没缓存」相悖。
+
+## 10. 建库接口：计划沿用「默认 recreate=true」→ 实现 mode/recreate 互斥校验
+
+- **计划（原状）**：`IngestRequest.recreate` 默认 `true`，前端靠 `recreate: mode==="full"` 手动规避。
+- **实现**：`recreate` 默认改为 `false`，接口层加两条互斥校验（不满足即 400）——① `mode=incremental` + `recreate=true` →「增量不能重建集合」（先清空再增量自相矛盾）；② `mode=full` + `recreate=false` →「全量必须重建集合，否则已删除数据不会清理」（全量管道只灌不删，差集是增量专属，`recreate=false` 会让源表已删记录变成僵尸点永久留在库里被检索）。互斥表写进 README「建知识库」与 `docs/FEATURES-admin-console.md`。
+- **原因**：默认值与增量模式天然互斥（只传 `mode="incremental"` 必撞 400），是个配置陷阱；而「全量 + 不重建」看似合法、实则产生**静默的数据残留**，比报错危险得多。改差集删除属于动建库管道核心逻辑，本轮明确不做，用 400 + 文档把规则立住。
+
+## 11. 图片接口状态码：计划统一 400 → 实现 400 / 413 / 415 分级 + 文件头嗅探
+
+- **计划（原状）**：类型不支持、体积超限统统 400；伪装成 `.png` 的 PDF 能过掉校验、直到调视觉模型才报错（表现为 502）。
+- **实现**：`vision.py` 新增 `sniff_mime()` / `verify_content()` 按**文件头（magic bytes）**核对真实格式，异常分三级——识别不出 → `ImageRejected`（400）；真实格式非 jpg/png/webp 或与声称不符 → `ImageUnsupported`（415）；超 `VISION_MAX_BYTES` → `ImageTooLarge`（413）；502 保留给上游模型故障。两个新异常是 `ImageRejected` 的子类，接口里 `except` 先子类后父类。同批把 `/api/retrieve`、`/api/kb/samples` 的 `VectorStoreError` 统一包成 503（与 `/api/kb/stats` 同口径），web_search 工具补上兜底 `except Exception`。
+- **原因**：后缀和 `content_type` 都能伪造，只看声明类型等于把校验建在攻击者可控的字段上；按 RFC 区分「东西不对（400）/ 东西太大（413）/ 格式不支持（415）/ 上游故障（502）」，前端才能给出对症提示，排障也不用猜。
+
+## 12. Neo4j 只读：计划「代码审查保证」→ 实现驱动级 READ 访问模式 + 查询超时
+
+- **计划（原状）**：只读保护只覆盖 `_read_rows` 一条路径；`_introspect_rows` 走 Neo4j 驱动默认的 WRITE 访问模式，安全性纯靠人工审查；`NEO4J_TIMEOUT` 注释写「查询超时」、实际只管连接与重试。
+- **实现**：建 driver 时指定 `default_access_mode=READ`（内省与查询都落在只读会话上，只读成为**驱动级默认**而非约定）；补真正的单条查询超时（事务超时 `NEO4J_QUERY_TIMEOUT`，已入 `.env.example`），`NEO4J_TIMEOUT` 的注释改回「连接超时与重试」；driver 增加应用关闭钩子（此前只建不关）。
+- **原因**：「约定的只读」在新增一条查询路径时就会失守，「配置的只读」不会——漏写代码还有驱动兜底。查询超时缺失意味着跑飞的变长路径（如无限深度的展开）只能靠人 Ctrl+C，服务端到点终止才叫限制。
