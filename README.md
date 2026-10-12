@@ -18,11 +18,11 @@
 
 ## 界面截图
 
-主对话页 · 浅色主题（三栏布局：会话栏 + 对话区 + 输入区，流式回答带来源条与工具轨迹）：
+主对话页 · 浅色主题（三栏布局：会话栏 + 对话区 + 证据栏，底部为输入区；流式回答带来源条与工具轨迹）：
 
 ![对话页浅色](docs/对话页-浅色.png)
 
-回答中的引用序号 `[1]` 可点击：右侧证据面板展开，逐条列出来源原文、向量/BM25/融合/重排四层名次与相似度，支持标记「不相关」：
+回答中的引用序号 `[1]` 可点击：右侧证据面板展开，逐条列出来源原文、向量/BM25/融合/重排四层名次与相似度（重排前后名次差用 ↑↓ 标出，如「融合 #5 重排 #4 ↑1」），支持标记「不相关」：
 
 ![证据面板](docs/证据面板.png)
 
@@ -290,14 +290,14 @@ cd backend
 
 ```powershell
 cd backend
-# 跑全部用例（当前 60 个）
+# 跑全部用例（当前 99 个）
 ..\.venv\Scripts\python.exe -m pytest tests -v
-# 用例 + 覆盖率（真实数字：60 个用例，覆盖率 32%）
+# 用例 + 覆盖率（真实数字：99 个用例，覆盖率 51.65%）
 ..\.venv\Scripts\python.exe -m pytest tests --cov=app --cov-report=term
 ```
 
 - `backend/tests/` 下的用例全部**离线**运行（`conftest.py` 预置假环境变量，不连真实数据库 / 向量库 / 大模型，也不触碰 `data/` 目录），覆盖 BM25 打分、RRF 融合、重排解析、文档切块、引用校验、增量建库差集、只读 SQL 护栏等纯函数与逻辑模块。
-- **60 个用例，当前覆盖率 32%**；`backend/pytest.ini` 里设了 **18% 的覆盖率门槛**——低于门槛 pytest 直接失败，防止后续改动让测试静默倒退。门槛刻意定得低：后端大量代码是与外部服务（数据库 / 大模型 / 图谱）交互的胶水层，离线单测测不了也不值得为凑数字而写。
+- **99 个用例，当前覆盖率 51.65%**；`backend/pytest.ini` 里设了 **18% 的覆盖率门槛**——低于门槛 pytest 直接失败，防止后续改动让测试静默倒退。门槛刻意定得低：后端大量代码是与外部服务（数据库 / 大模型 / 图谱）交互的胶水层，离线单测测不了也不值得为凑数字而写。
 
 ### CI
 
@@ -308,7 +308,7 @@ cd backend
 | `test`（后端） | `pip install -r requirements.txt` + `pytest` | 在 `backend/` 下运行，覆盖率门槛随 `pytest.ini` 一起生效 |
 | `frontend-typecheck` | `npm ci` + `npx tsc --noEmit` | 只做 TypeScript 类型检查，**不跑 `next build`**——构建需要完整的 Next.js 环境且耗时数倍，类型检查已能拦住绝大多数回归 |
 
-- 完整运行记录见 [Actions](https://github.com/299434a-byte/bidding-qa-chatbot/actions/workflows/ci.yml)（最近一次：**两个 job 全绿**，总耗时 46 秒）。
+- 完整运行记录见 [Actions](https://github.com/299434a-byte/bidding-qa-chatbot/actions/workflows/ci.yml)（最近一次：**两个 job 全绿**，总耗时 52 秒）。
 
 ![CI 两个 job 全绿](docs/ci-actions.png)
 
@@ -339,7 +339,7 @@ bidding-qa-chatbot/
 ├── .github/workflows/ci.yml    CI（后端 pytest + 前端类型检查）
 ├── .env.example                配置模板（真实 .env 不入库）
 ├── .gitignore
-├── DEMO.md                     30–60 秒演示脚本（六步 + 检查清单）
+├── DEMO.md                     30–60 秒演示脚本（七步 + 检查清单）
 ├── requirements.txt
 └── README.md
 ```
