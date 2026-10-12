@@ -725,39 +725,33 @@ def health() -> dict[str, Any]:
 # 配置回显接口：把「当前真正生效的配置」列出来。
 # 主要用途是排查「我改了 .env 怎么没生效」这类问题 —— 直接调一下就知道后端眼里是什么值。
 # 【安全注意】所有口令类字段一律只回显「是否设置了」（布尔值），绝不回显口令本身。
+# 【部署加固】配置含内网主机 / 库名 / 文件路径等拓扑信息，与 /api/metrics 同一
+#   口径加 current_user 依赖，未登录返回 401；登录后也不回显主机、端口、库名、
+#   表清单、路径等敏感字段——只回显「是否已配置」、模型名与纯调参项。
 @app.get("/api/config")
-def read_config() -> dict[str, Any]:
-    """回显当前生效配置，方便排查「.env 没生效」类问题。口令一律不回显。"""
+def read_config(user: dict[str, Any] = Depends(auth.current_user)) -> dict[str, Any]:
+    """回显当前生效配置，方便排查「.env 没生效」类问题。口令一律不回显。需要登录。"""
     # 这里显式标注类型 Settings，是为了让编辑器能提示字段名（纯注解，不影响运行）。
     s: Settings = get_settings()
     return {
-        # MySQL 连接信息（口令只回显「是否已设置」）。
+        # MySQL 连接状态（口令只回显「是否已设置」；主机 / 端口 / 库名 / 表清单属
+        # 内网拓扑信息，一律不回显）。
         "mysql": {
-            "host": s.mysql_host,
-            "port": s.mysql_port,
-            "database": s.mysql_database,
             "user": s.mysql_user,
             # bool(...) 把字符串转成 True/False，避免口令泄露。
             "password_set": bool(s.mysql_password),
             "charset": s.mysql_charset,
         },
-        # 参与建库的表清单：每张表带上「中文标签」。
-        # label_of(t) 会去查该表在 MySQL 里的注释（运行时读取，不在代码里写死业务名）。
-        "tables": [
-            {"table": t, "label": s.label_of(t)} for t in s.kb_tables
-        ],
         # 向量库信息。mode 说明是「嵌入式本地模式」（没有 Docker，数据存本地目录）。
         "qdrant": {
             "mode": "embedded-local",
-            # str(...) 把路径对象转成字符串，JSON 才能序列化。
-            "path": str(s.qdrant_path),
             "collection": s.qdrant_collection,
         },
         # 向量模型信息（维度必须与向量库中已存数据一致，否则无法检索）。
         "embedding": {"model": s.embed_model, "dim": s.embed_dim},
         # BM25 关键词索引参数。k1、b 是 BM25 公式里控制「词频饱和」与
         # 「文档长度归一化」强度的两个系数，属于调参项，故一并回显。
-        "bm25": {"index_path": str(s.bm25_index_path), "k1": s.bm25_k1, "b": s.bm25_b},
+        "bm25": {"k1": s.bm25_k1, "b": s.bm25_b},
         # 检索参数：两路各取多少候选、最终给模型几条、融合时的 RRF 系数、向量相似度下限。
         "retrieval": {
             "dense_top_k": s.retrieve_dense_top_k,
@@ -777,7 +771,6 @@ def read_config() -> dict[str, Any]:
         # 大模型参数。
         "llm": {
             "configured": s.llm_configured,
-            "base_url": s.llm_base_url or None,
             "model": s.llm_model or None,
             "model_display": s.llm_display_name or None,
             "temperature": s.llm_temperature,
@@ -809,12 +802,9 @@ def read_config() -> dict[str, Any]:
             + ([GRAPH_TOOL_NAME] if s.graph_configured else [])
             + ([WEB_SEARCH_TOOL_NAME] if s.web_search_configured else []),
         },
-        # PostgreSQL 配置（口令只回显是否设置）。
+        # PostgreSQL 配置（口令只回显是否设置；主机 / 端口 / 库名不回显）。
         "postgres": {
             "configured": s.pg_configured,
-            "host": s.pg_host,
-            "port": s.pg_port,
-            "database": s.pg_database,
             "schema": s.pg_schema,
             "user": s.pg_user,
             "password_set": bool(s.pg_password),
@@ -825,12 +815,9 @@ def read_config() -> dict[str, Any]:
             "schema_ttl": s.pg_schema_ttl,
             "tools": [PG_TOOL_NAME],
         },
-        # Neo4j 配置（口令只回显是否设置）。
+        # Neo4j 配置（口令只回显是否设置；连接串 / 库名 / 账号不回显）。
         "neo4j": {
             "configured": s.graph_configured,
-            "uri": s.neo4j_uri or None,
-            "database": s.neo4j_database,
-            "user": s.neo4j_user,
             "password_set": bool(s.neo4j_password),
             "model": s.graph_model_or_default or None,
             "max_rows": s.neo4j_max_rows,
@@ -862,7 +849,6 @@ def read_config() -> dict[str, Any]:
             "enabled": s.history_enabled,
             "configured": s.history_configured,
             "storage": "sqlite",
-            "db_path": str(s.history_db_path),
             "page_size": s.history_page_size,
             "search_limit": s.history_search_limit,
             "title_max_chars": s.history_title_max_chars,
@@ -873,12 +859,9 @@ def read_config() -> dict[str, Any]:
             # 当前已有多少会话/消息等统计。
             "counts": history_store.stats(s),
         },
-        # 账号体系配置（这里没有敏感信息，口令强度之类的参数可以直接显示）。
+        # 账号体系配置（口令强度、令牌有效期、防爆破参数属安全配置，不回显具体值）。
         "auth": {
             "enabled": s.auth_enabled,
-            "token_ttl_days": s.auth_token_ttl_days,
-            "pbkdf2_iterations": s.auth_pbkdf2_iterations,
-            "max_login_attempts": s.auth_max_login_attempts,
             "lockout_seconds": s.auth_lockout_seconds,
         },
     }
