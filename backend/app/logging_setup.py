@@ -99,6 +99,11 @@ def setup_logging(settings: Settings | None = None) -> None:
             #   服务器跑几个月就能把磁盘写满。TimedRotatingFileHandler 在每天午夜
             #   把当前日志改名成 app.log.2026-10-11 这样的历史文件，只保留最近 7 份
             #   （backupCount=7），旧的自动删；轮转后的文件同样用 utf-8，中文不乱码。
+            # 【为什么 utc=True（与全项目口径一致）】项目内时间戳统一 UTC
+            # （日志行里的 %H:%M:%S、created_at、轮转文件名后缀全是 UTC），
+            # 不加这个参数时轮转点却按「本机本地时间的午夜」算，文件名日期与
+            # 日志内容时间戳会差一个时区，排障对时间对不上。
+            # 代价：轮转发生在 UTC 午夜（东八区 08:00），仅此而已。
             try:
                 # 确保日志文件所在目录存在（例如 backend/data/）。
                 s.log_file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -107,6 +112,7 @@ def setup_logging(settings: Settings | None = None) -> None:
                     when="midnight",
                     backupCount=7,
                     encoding="utf-8",
+                    utc=True,
                 )
                 file_handler.setFormatter(formatter)
                 file_handler.setLevel(level)
