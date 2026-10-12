@@ -41,7 +41,7 @@ def test_same_version_hits(tmp_path) -> None:
     kb_version.write_kb_version(s, points=100, added=1, updated=0, deleted=0)
 
     assert answer_cache.set_cached("市政道路招标有哪些", "答案正文", [{"title": "来源1"}], "llm", s) is True
-    hit = answer_cache.get_cached("市政道路招标有哪些", s)
+    hit = answer_cache.get_cached("市政道路招标有哪些", s, mode="llm")
     assert hit is not None
     assert hit["answer"] == "答案正文"
     assert hit["sources"] == [{"title": "来源1"}]
@@ -61,7 +61,7 @@ def test_version_change_invalidates_same_question(tmp_path) -> None:
     kb_version.write_kb_version(s, points=200, added=5, updated=1, deleted=1)
 
     # 同一个问题：版本对不上 → 一律当未命中（宁可重算，不用旧答案）。
-    assert answer_cache.get_cached("同一个问题", s) is None
+    assert answer_cache.get_cached("同一个问题", s, mode="llm") is None
 
 
 # ----------------------------------------------------------------------------
@@ -108,7 +108,7 @@ def test_kb_version_read_failure_does_not_break_qa(tmp_path) -> None:
 
     # 「不影响问答」的直接证据：缓存读写全部照常、不抛异常，且同版本内能命中。
     assert answer_cache.set_cached("版本坏了也照样缓存", "答案", [], "llm", s) is True
-    hit = answer_cache.get_cached("版本坏了也照样缓存", s)
+    hit = answer_cache.get_cached("版本坏了也照样缓存", s, mode="llm")
     assert hit is not None
     assert hit["answer"] == "答案"
 
@@ -123,5 +123,5 @@ def test_clear_removes_all_rows(tmp_path) -> None:
     answer_cache.set_cached("问题二", "答案二", [], "llm", s)
 
     assert answer_cache.clear(s) is True
-    assert answer_cache.get_cached("问题一", s) is None
-    assert answer_cache.get_cached("问题二", s) is None
+    assert answer_cache.get_cached("问题一", s, mode="llm") is None
+    assert answer_cache.get_cached("问题二", s, mode="llm") is None

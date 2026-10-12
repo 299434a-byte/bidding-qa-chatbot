@@ -30,12 +30,15 @@
 多余空白」归一化之后字符串完全相同，才算命中；近义改写不算命中。
 
 对外接口：
-    · ``normalize_question(q)`` —— 生成规范化键（也就是缓存主键）；
+    · ``normalize_question(q)`` —— 把问题规范化（抹平大小写/全半角/空白差异）；
+    · ``cache_key(q, ...)``     —— 生成缓存主键（规范化问题 + 模式 + top_k）；
     · ``is_cacheable(...)``     —— 判断「这个请求该不该进缓存」；
-    · ``get_cached(q)``         —— 查缓存，未命中/过期/出错都返回 ``None``；
+    · ``get_cached(q, ...)``    —— 查缓存，未命中/过期/出错都返回 ``None``；
     · ``set_cached(q, ...)``    —— 写缓存，失败静默返回 ``False``。
 
 所有读写失败一律静默降级：缓存是「锦上添花」，绝不能因为它坏了而影响问答。
+（例外：TTL 判定依据 created_at 解析失败不算「读失败」，按未命中处理并记 warning——
+宁可重算，也不把来路不明的行当命中。）
 """
 
 from __future__ import annotations
@@ -44,6 +47,8 @@ from __future__ import annotations
 import datetime as dt
 # json：把「参考来源列表」序列化成 JSON 文本存进数据库的一列，读回来再还原成列表。
 import json
+# logging：解析失败等「不该静默吞掉」的情况记 warning（读写失败仍静默降级）。
+import logging
 # re：正则，用来把连续空白（空格/制表符/换行）压成一个空格。
 import re
 # sqlite3：标准库自带的轻量数据库，缓存就存在一个本地 .db 文件里。
@@ -67,7 +72,8 @@ from . import kb_version
 
 # 建表语句（DDL）。用 CREATE TABLE IF NOT EXISTS —— 「不存在才建」，所以反复执行也安全。
 # 【字段说明（大白话）】
-#   cache_key    —— 规范化后的提问，作为主键（同一个键只存一条，重复写会覆盖）；
+#   cache_key    —— 缓存主键 = 规范化问题 + 请求模式 + top_k（见 cache_key()）；
+#                   同一个键只存一条，重复写会覆盖；
 #   question     —— 用户原始问题（保留原样，方便人工查看缓存里都存了啥）；
 #   answer       —— 大模型给出的完整回答正文；
 #   sources_json —— 参考来源列表（JSON 文本），命中时能一并把「来源卡片」还原出来；
@@ -122,7 +128,7 @@ def normalize_question(question: str) -> str:
       2) 去掉首尾空白；
       3) 整体转小写：例如「Hello」与「HELLO」视为同一个问题；
       4) 把连续空白压成一个空格：例如「招标   公告」与「招标 公告」视为同一个问题。
-    最终结果既是「规范化问题」，也直接当作数据库主键 ``cache_key``。
+    返回的是「规范化问题」；真正的缓存主键还要拼上模式与 top_k，见 :func:`cache_key`。
     """
     # 【为什么要防 None】调用方可能传进来 None（类型标注是 str，但运行时不一定）。
     # 用 `question or ""` 兜底成空字符串，避免下面 .normalize 直接崩。
@@ -140,10 +146,39 @@ def normalize_question(question: str) -> str:
     return text.strip()
 
 
-# 语义别名：缓存键就是「规范化问题」。单独给个名字，让调用处读起来更直白。
-def cache_key(question: str) -> str:
-    """缓存主键 = 规范化问题（见 :func:`normalize_question`）。"""
-    return normalize_question(question)
+# 模块级 logger：与 rerank.py 同款（logging.getLogger(__name__)，名字形如 app.answer_cache）。
+logger = logging.getLogger(__name__)
+
+
+# 键各段之间的分隔符：ASCII 的「单元分隔符」，正常文本里不会出现，
+# 避免问题原文里写个空格/竖线就把两段糊在一起（键撞车）。
+_KEY_SEP = "\x1f"
+
+
+# cache_key：生成缓存主键 = 规范化问题 + 请求模式 + top_k。
+# 【为什么模式要进主键】react 与 plan 对同一问题的答案可能完全不同（plan 会拆解
+# 子任务再综合），若只按问题匹配，会把 A 模式的答案端给 B 模式（实测串答案）。
+# 【为什么 top_k 进主键】top_k 决定送进大模型的参考资料条数，答案随之变化，
+# 同问题不同 top_k 不能互相命中。
+# 【老键自然失效】主键从「纯规范化问题」变成复合键后，老行的键与新算法对不上，
+# 自动不再命中——无需迁移，宁可重算。
+def cache_key(question: str, *, mode: str = "react", top_k: int | None = None) -> str:
+    """缓存主键 = ``normalize_question(question)`` + 请求模式 + top_k。
+
+    ``mode`` 是**请求模式**（react / plan / llm……），不是结束模式（agent_rag 等）；
+    ``top_k`` 未指定（None / 0 / 负数）统一记 0，读写两侧取同一口径即可命中。
+    """
+    q = normalize_question(question)
+    # 模式空白剔除 + 小写：同一模式的不同写法（"React" / " react"）算同一个键。
+    m = (mode or "react").strip().lower() or "react"
+    # top_k 归一成非负整数：没给/解析不了/负数统一记 0（读写两侧都按此归一）。
+    try:
+        k = int(top_k) if top_k else 0
+    except (TypeError, ValueError):
+        k = 0
+    if k < 0:
+        k = 0
+    return f"{q}{_KEY_SEP}{m}{_KEY_SEP}{k}"
 
 
 def looks_sensitive(question: str) -> bool:
@@ -290,8 +325,17 @@ def _parse_iso(text: str) -> dt.datetime | None:
         return None
 
 
-def get_cached(question: str, settings: Settings | None = None) -> dict[str, Any] | None:
+def get_cached(
+    question: str,
+    settings: Settings | None = None,
+    *,
+    mode: str = "react",
+    top_k: int | None = None,
+) -> dict[str, Any] | None:
     """查缓存。命中且未过期返回结果字典；未命中/过期/出错一律返回 ``None``。
+
+    ``mode`` / ``top_k`` 参与主键（见 :func:`cache_key`）：读写两侧必须传同一套值，
+    否则视为两个不同的缓存条目。
 
     返回字典字段：``question`` / ``answer`` / ``sources``（已还原成列表）/ ``mode`` / ``created_at``。
     """
@@ -299,11 +343,11 @@ def get_cached(question: str, settings: Settings | None = None) -> dict[str, Any
     s = settings or get_settings()
     # 【静默降级】任何异常都当作「没缓存」，绝不影响问答主流程。
     try:
-        # 把问题规范化，得到主键。
-        key = normalize_question(question)
         # 空问题不查（避免把空串当成一个有效缓存）。
-        if not key:
+        if not normalize_question(question):
             return None
+        # 主键 = 规范化问题 + 请求模式 + top_k（与写入侧同一套 cache_key 逻辑）。
+        key = cache_key(question, mode=mode, top_k=top_k)
         # 打开连接并确保表存在。
         with _connect(s) as conn:
             _ensure_schema(conn, s.cache_db_path)
@@ -318,11 +362,19 @@ def get_cached(question: str, settings: Settings | None = None) -> dict[str, Any
         if row is None:
             return None
         # 判断是否过期：当前时间 - 写入时间 > TTL 就当作未命中。
+        # 【解析失败 = 未命中（fail-closed）】跳过 TTL 检查把「来路不明的行」当命中
+        # 是 fail-open：坏数据反而被回放。这里按未命中处理并记 warning 供排查。
         created = _parse_iso(row["created_at"])
-        if created is not None:
-            age_seconds = (dt.datetime.now(dt.timezone.utc) - created).total_seconds()
-            if age_seconds > s.cache_ttl:
-                return None
+        if created is None:
+            logger.warning(
+                "answer_cache: created_at 解析失败，按未命中处理（question=%r created_at=%r）",
+                row["question"],
+                row["created_at"],
+            )
+            return None
+        age_seconds = (dt.datetime.now(dt.timezone.utc) - created).total_seconds()
+        if age_seconds > s.cache_ttl:
+            return None
         # 还原 sources_json（坏数据用空列表兜底，不让它打断命中判断）。
         try:
             sources = json.loads(row["sources_json"] or "[]")
@@ -346,15 +398,24 @@ def set_cached(
     sources: list[dict[str, Any]] | None,
     mode: str,
     settings: Settings | None = None,
+    *,
+    key_mode: str | None = None,
+    top_k: int | None = None,
 ) -> bool:
-    """写缓存。成功返回 ``True``；任何失败静默返回 ``False``（不影响问答）。"""
+    """写缓存。成功返回 ``True``；任何失败静默返回 ``False``（不影响问答）。
+
+    ``mode`` 存进 mode 列（结束模式，命中时原样回放给前端）；
+    ``key_mode`` 才是进缓存键的**请求模式**（react / plan / llm……），不传则退回 ``mode``
+    （纯 RAG 路径两者本就同值）；``top_k`` 与读取侧一样进键。读写必须同一套 key 逻辑。
+    """
     s = settings or get_settings()
     # 【静默降级】写缓存失败不该让用户察觉，所以整体包 try。
     try:
-        key = normalize_question(question)
-        # 空主键或空答案没有缓存价值，直接跳过。
-        if not key or not (answer or "").strip():
+        # 空问题或空答案没有缓存价值，直接跳过。
+        if not normalize_question(question) or not (answer or "").strip():
             return False
+        # 主键 = 规范化问题 + 请求模式 + top_k（与读取侧同一套 cache_key 逻辑）。
+        key = cache_key(question, mode=key_mode or mode, top_k=top_k)
         # 把来源列表序列化成 JSON 文本（中文原样保留）。
         sources_json = json.dumps(sources or [], ensure_ascii=False)
         with _connect(s) as conn:

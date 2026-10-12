@@ -1542,8 +1542,10 @@ def chat(
     )
     # 【先查缓存】读缓存走「读准绳」is_cache_readable（与写准绳刻意不对称，见该函数 docstring）；
     # 命中拿到答案字典，未命中/出错一律 None（静默降级）。写入仍用上面的 cacheable。
+    # 【键的口径】mode="llm" + top_k 参与缓存主键：读写两侧必须同一套，
+    # 否则 react/plan/llm 或不同 top_k 的答案会互相串（见 answer_cache.cache_key）。
     cached = (
-        answer_cache.get_cached(payload.question, s)
+        answer_cache.get_cached(payload.question, s, mode="llm", top_k=payload.top_k)
         if answer_cache.is_cache_readable(
             logged_in=logged_in, mode="llm", has_image=False, question=payload.question
         )
@@ -1629,7 +1631,12 @@ def chat(
         # 写失败静默（answer_cache 内部已兜底），绝不打断已完成的问答。
         answer_text = "".join(answer_parts).strip()
         if cacheable and answer_text:
-            answer_cache.set_cached(payload.question, answer_text, sources, done_mode, s)
+            # key_mode="llm" 与上面 get_cached 的 mode 同口径（done_mode 是结束模式，
+            # 只进 mode 列回放，不进缓存键）。
+            answer_cache.set_cached(
+                payload.question, answer_text, sources, done_mode, s,
+                key_mode="llm", top_k=payload.top_k,
+            )
 
         # 记指标 + 打日志（同样不产生 SSE 事件，不影响事件顺序）。
         _finalize_qa(
@@ -1737,8 +1744,9 @@ async def agent_chat(
     # 【先查缓存】读缓存走「读准绳」is_cache_readable（与写准绳刻意不对称，见该函数 docstring）：
     # 带历史 / 允许联网不再拦「读」——缓存里只可能是无历史、未联网的标准答案，精确命中即可复用。
     # 命中拿到答案字典，未命中/出错一律 None（静默降级）。写入侧的准绳在收尾处按「是否真联网」重算。
+    # 【键的口径】mode（react/plan）+ top_k 参与缓存主键：react 与 plan 不许互相命中。
     cached = (
-        answer_cache.get_cached(payload.question, s)
+        answer_cache.get_cached(payload.question, s, mode=mode, top_k=payload.top_k)
         if answer_cache.is_cache_readable(
             logged_in=bool(user), mode=mode, has_image=False, question=payload.question
         )
@@ -1923,8 +1931,11 @@ async def agent_chat(
         # 【为什么要求未断线】断线时正文可能是残缺的，缓存残缺答案会误导后续用户。
         # 写失败静默（answer_cache 内部已兜底），绝不打断已完成的问答。
         if writable and not disconnected and answer:
+            # key_mode=mode：进缓存键的是「请求模式」（react/plan）；collector.done_mode
+            # （agent_rag 等结束模式）只进 mode 列回放。与上面 get_cached 同一套键。
             answer_cache.set_cached(
-                payload.question, answer, collector.sources, collector.done_mode or mode, s
+                payload.question, answer, collector.sources, collector.done_mode or mode, s,
+                key_mode=mode, top_k=payload.top_k,
             )
 
         # 记指标 + 打日志（不产生 SSE 事件，不影响事件顺序）。

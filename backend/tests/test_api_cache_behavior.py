@@ -172,7 +172,7 @@ def test_sensitive_question_is_never_cached(client_and_llm) -> None:
     assert llm.calls == 2
     # 证据二：缓存表里没有任何行（哪怕手工查也查不到）。
     s = get_settings()
-    rows = answer_cache.get_cached(question, s)
+    rows = answer_cache.get_cached(question, s, mode="llm")
     assert rows is None
 
 

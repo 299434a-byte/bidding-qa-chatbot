@@ -46,7 +46,7 @@ def test_normalized_key_hits(tmp_path) -> None:
     assert answer_cache.set_cached("Hello   World", "答案正文", [{"title": "来源1"}], "llm", s) is True
 
     # 用「大小写 + 空白」不同的写法查询 → 规范后相同 → 命中。
-    hit = answer_cache.get_cached("hello world", s)
+    hit = answer_cache.get_cached("hello world", s, mode="llm")
     assert hit is not None
     assert hit["answer"] == "答案正文"
     # sources 应当被 JSON 还原成列表。
@@ -54,7 +54,7 @@ def test_normalized_key_hits(tmp_path) -> None:
     assert hit["mode"] == "llm"
 
     # 换一个语义不同的问题 → 不应命中（证明是「精确匹配」而非模糊匹配）。
-    assert answer_cache.get_cached("hello there", s) is None
+    assert answer_cache.get_cached("hello there", s, mode="llm") is None
 
 
 def test_ttl_expiry(tmp_path) -> None:
@@ -64,7 +64,7 @@ def test_ttl_expiry(tmp_path) -> None:
     assert answer_cache.set_cached("问题", "答案", [], "llm", s) is True
 
     # 刚写入时应当命中（未过期）。
-    assert answer_cache.get_cached("问题", s) is not None
+    assert answer_cache.get_cached("问题", s, mode="llm") is not None
 
     # 手工把 created_at 改成「2 小时前」——已超过 1 小时 TTL。
     past = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=7200)).isoformat()
@@ -76,7 +76,7 @@ def test_ttl_expiry(tmp_path) -> None:
         conn.close()
 
     # 再查 → 应判定为过期，返回 None。
-    assert answer_cache.get_cached("问题", s) is None
+    assert answer_cache.get_cached("问题", s, mode="llm") is None
 
 
 def test_is_cacheable_guardrails() -> None:
@@ -112,4 +112,4 @@ def test_set_cached_failure_is_silent(tmp_path) -> None:
     # 不抛异常，只返回 False。
     assert answer_cache.set_cached("问题", "答案", [], "llm", s) is False
     # 读也应静默返回 None（同样不抛）。
-    assert answer_cache.get_cached("问题", s) is None
+    assert answer_cache.get_cached("问题", s, mode="llm") is None
