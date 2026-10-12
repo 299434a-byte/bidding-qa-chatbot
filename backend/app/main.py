@@ -219,16 +219,20 @@ from .retriever import retrieve
 # 【向量库】VectorStoreError 向量库专用异常；get_store 取得（并缓存）向量库连接。
 from .vector_store import VectorStoreError, get_store
 
-# 【图片解析】ImageRejected 表示图片本身不合规（类型/体积），对应 HTTP 400；
+# 【图片解析】ImageRejected 表示图片本身不合规，对应 HTTP 400；
+#   ImageTooLarge（体积超限）→ 413、ImageUnsupported（真实格式不支持/不符）→ 415，
+#   两者都是 ImageRejected 的子类 —— 捕获顺序必须「先子类后父类」，否则状态码会被 400 盖掉；
 # VisionError 表示解析环节出错（没配 Key / 模型报错 / 超时），对应 HTTP 502。
-from .vision import ImageRejected, VisionError
+from .vision import ImageRejected, ImageTooLarge, ImageUnsupported, VisionError
 
-# 把 vision 的三个函数各起一个更明确的名字导入，避免和本文件的接口函数重名：
+# 把 vision 的四个函数各起一个更明确的名字导入，避免和本文件的接口函数重名：
 # run_analyze_image 真正调用视觉模型；check_image_size 校验体积；
-# resolve_image_mime 推断图片真实类型（先看文件名后缀，再看浏览器上报的类型）。
+# resolve_image_mime 推断图片声称的类型（先看文件名后缀，再看浏览器上报的类型）；
+# verify_image_content 嗅探文件头，核对真实格式（防「PDF 改名成 .png」这类伪造）。
 from .vision import analyze_image as run_analyze_image
 from .vision import check_size as check_image_size
 from .vision import resolve_mime as resolve_image_mime
+from .vision import verify_content as verify_image_content
 
 # 【联网搜索】导入工具名并改名，避免与本文件其它 TOOL_NAME 混淆。
 from .web_search import TOOL_NAME as WEB_SEARCH_TOOL_NAME
@@ -1284,30 +1288,53 @@ async def history_search(
 #   否则任何人都能匿名刷这个接口，白白消耗额度。
 @app.post("/analyze-image")
 async def analyze_image(
-    file: UploadFile = File(..., description="待解析的图片（jpg / png / webp，≤10MB）"),
+    file: UploadFile = File(..., description="待解析的图片（jpg / png / webp；大小上限见配置 VISION_MAX_BYTES，默认 10MB）"),
     question: str = Form("", description="可选：随图片一起提交的提问文字"),
     user: dict[str, Any] = Depends(auth.current_user),
 ) -> dict[str, Any]:
     """图片解析：把图片交给智谱视觉模型识别成结构化文本。
 
-    返回 401 表示未登录；400 表示图片本身不合规（类型不支持 / 体积超限）；
-    返回 502 表示解析失败（未配 Key / 模型报错 / 超时）。
+    状态码按 RFC 语义分级（不再一律 400）：
+    401 未登录；400 文件头识别不出 / 空文件 / 声称的类型不支持；
+    413 体积超过 VISION_MAX_BYTES；415 真实格式不是 jpg/png/webp 或与声称不符；
+    502 解析失败（未配 Key / 模型报错 / 超时）。
     """
     s = get_settings()
     # `await file.read()`：把上传的文件内容一次性读进内存（bytes 类型）。
     # 注意：文件在读出前一直以临时文件形式存在，读入内存后即可丢弃。
     data = await file.read()
-    # 第一道关卡：校验图片「类型」和「体积」。
+    # 第一道关卡：校验图片「声称的类型」和「体积」。
     try:
-        # 推断图片真实类型（先看文件名后缀，再看浏览器上报的 content_type）。
+        # 推断图片声称的类型（先看文件名后缀，再看浏览器上报的 content_type）。
         # 【为什么自己推断而不信浏览器】content_type 是浏览器说了算、可伪造的，
         # 用它做安全判断不可靠；后缀和它交叉验证才稳。
         mime = resolve_image_mime(file.filename, file.content_type)
-        # 校验体积是否超过上限（默认 10MB）。超限会抛 ImageRejected。
+        # 校验体积是否超过上限（默认 10MB）。超限会抛 ImageTooLarge（→ 413）。
         check_image_size(len(data), s)
+    # 捕获顺序：先子类（413/415）后父类（400），否则子类也会被当成 400。
+    except ImageTooLarge as exc:
+        # 体积超限 → 413：是「东西太大」而不是「东西不对」，让前端能分开提示。
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    except ImageUnsupported as exc:
+        # 文件头真实格式不支持/与声称不符 → 415。
+        raise HTTPException(status_code=415, detail=str(exc)) from exc
     except ImageRejected as exc:
-        # 图片不合规 → 400：让前端明确知道「是你的图片不行」，
+        # 其余不合规（声称类型不支持、空文件）→ 400：让前端明确知道「是你的图片不行」，
         # 而不是把「图片不合规」伪装成「服务故障」。
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # 第二道关卡：嗅探文件头，核对「真实格式」。
+    # 【为什么必须有这一步】后缀和 content_type 都能伪造——把 PDF 改名成 .png
+    # 能一路过掉上面的校验，直到调视觉模型才报错（曾表现为莫名 502）。
+    # 看文件头就能在调模型之前识破：识别不出 → 400，格式不符/不支持 → 415。
+    try:
+        verify_image_content(data, mime)
+    except ImageUnsupported as exc:
+        # 注意顺序：必须先捕获子类 ImageUnsupported，再捕获父类 ImageRejected，
+        # 否则 415 会被父类的 except 抢先匹配、错误地返回 400。
+        raise HTTPException(status_code=415, detail=str(exc)) from exc
+    except ImageRejected as exc:
+        # 文件头识别不出任何已知格式 → 400。
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     # 第二道关卡：真正调视觉模型解析。
@@ -1379,8 +1406,14 @@ def _bm25_doc_count(s: Settings) -> int:
 @app.get("/api/kb/samples")
 def kb_samples(limit: int = Query(5, ge=1, le=50)) -> dict[str, Any]:
     s = get_settings()
-    # .sample(limit) 从向量库里随机/顺序取出若干条原始片段。
-    return {"samples": get_store(s).sample(limit)}
+    try:
+        # .sample(limit) 从向量库里随机/顺序取出若干条原始片段。
+        return {"samples": get_store(s).sample(limit)}
+    except VectorStoreError as exc:
+        # 与 /api/kb/stats 口径一致：向量库连不上/被锁/维度不符 → 503，
+        # 而不是让异常冒成 500（语义是「服务暂时不可用」，前端可提示稍后重试）。
+        logger.warning("知识库样本读取失败（向量库）：%s", exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 # 纯检索接口（不调大模型生成答案）。
@@ -1409,7 +1442,15 @@ def retrieve_only(
     pool_k = max(want_k, s.rerank_candidates) if rerank else want_k
 
     # 混合检索：向量（语义相似）+ BM25（关键词命中），再用 RRF 融合成一份候选列表。
-    result = retrieve(q, settings=s, final_k=pool_k)
+    # 【为什么要包一层】retriever.retrieve 只兜住了 dense 那一路的内部异常；
+    # get_store / get_embedder / load_bm25 / search_sparse 都在它自己的 try 之外，
+    # 向量库被锁、维度不符时 VectorStoreError 会直接冒出来变 500。
+    # 这里统一收敛成 503（与 /api/kb/stats、/api/kb/samples 同口径）并记日志。
+    try:
+        result = retrieve(q, settings=s, final_k=pool_k)
+    except VectorStoreError as exc:
+        logger.warning("检索失败（向量库）q=%r：%s", q, exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     # 预先准备一个空字典装「重排的元信息」（用了哪个模型、耗时、是否降级等）。
     # 显式标注类型是为了让编辑器能提示（纯注解，不影响运行）。

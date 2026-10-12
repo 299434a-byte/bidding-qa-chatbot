@@ -54,12 +54,13 @@ const webSearchOn  = canWebSearch && (webSearch ?? health?.web_search_default ??
 
 - **未配置 Key**：`search_web_bidding()` 检测 `s.web_search_configured` 为假时，记下 `state["error"]`、清空 `state["results"]`，返回「联网搜索不可用：后端未配置 TAVILY_API_KEY。请如实告知用户，不要编造搜索结果。」
 - **搜索失败**（未装 SDK / 网络异常 / 超时）：捕获 `WebSearchError` 后**不让整轮问答失败**——记下错误、清空结果，返回「请如实告知用户联网搜索未成功，不要编造任何搜索结果」，模型仍能基于已有本地信息继续作答。
+- **一切意外异常**：工具承诺「绝不把异常抛回 Agent」（与 `pg.py` / `graph.py` 同一口径）。`WebSearchError` 之外的异常（SDK 返回结构异常、状态字典缺 `settings` 等）被外层 `except Exception` 兜住，转成「联网搜索失败：……」的可读提示，问答继续。
 - **搜索无结果**：`render_results()` 在结果为空时同样明确提示「没有返回任何结果……不要编造任何公告标题、链接或日期」。
 - 无论成功失败，本工具都被 `asyncio.to_thread(_search, ...)` 包起来，避免阻塞事件循环。
 
 ### 错误码语义
 
-- 本模块自身抛出的 `WebSearchError(RuntimeError)` 不直接对外暴露 HTTP 状态码，而是被**收敛成给模型看的文字提示**（见上）。它的人话原因覆盖：未安装 Tavily SDK、未配置 Key、联网搜索失败（含 SDK 各类异常）。
+- 本模块自身抛出的 `WebSearchError(RuntimeError)` 不直接对外暴露 HTTP 状态码，而是被**收敛成给模型看的文字提示**（见上）。它的人话原因覆盖：未安装 Tavily SDK、未配置 Key、联网搜索失败（含 SDK 各类异常）；`WebSearchError` 之外的意外异常同样被兜住并转成「联网搜索失败：……」提示（`tests/test_web_search_fallback.py` 覆盖）。
 - 搜索结果若成功，回填 `state`：`{"query": ..., "results": [...], "error": None}`；前端据 `state` 渲染「联网搜索」事件与相关性评分。
 - **缓存联动**：凡是「会联网」的请求都不进问答缓存（`answer_cache.is_cacheable(..., web_search=use_web, ...)` 为假），因为联网结果有时效性。
 
@@ -90,18 +91,23 @@ const webSearchOn  = canWebSearch && (webSearch ?? health?.web_search_default ??
 
 ### 错误码语义
 
-`main.py` 的 `/analyze-image` 接口按两类自定义异常区分状态码：
+`main.py` 的 `/analyze-image` 接口按四类自定义异常区分状态码（体积上限见配置 `VISION_MAX_BYTES`，默认 10MB）：
 
 | 状态码 | 触发条件 | 对应异常 | 语义 |
 | --- | --- | --- | --- |
 | **401** | 未登录 | 依赖 `auth.current_user` | 图片解析消耗付费模型额度，要求先登录 |
-| **400** | 图片本身不合规：类型不支持 / 体积超限 / 内容为空 | `ImageRejected(ValueError)` | 「你（调用方）给的数据有问题」 |
+| **400** | 文件头识别不出任何已知格式 / 内容为空 / 声称的类型（后缀、content-type）不支持 | `ImageRejected(ValueError)` | 「你（调用方）给的数据有问题」 |
+| **413** | 体积超过 `vision_max_bytes` | `ImageTooLarge(ImageRejected)` | 「东西太大」而非「东西不对」 |
+| **415** | 文件头能识别但真实格式不是 jpg/png/webp（如改名成 `.png` 的 PDF），或与声称的类型不一致 | `ImageUnsupported(ImageRejected)` | 「格式不支持 / 与声称不符」 |
 | **502** | 未配 Key / 模型报错 / 超时 / 返回空内容 | `VisionError(RuntimeError)` | 「我们这一侧上游（模型服务）出问题」 |
+
+> `ImageTooLarge` / `ImageUnsupported` 是 `ImageRejected` 的**子类**，接口里的 `except` 必须先捕获子类再捕获父类，否则 413/415 会被 400 抢先匹配。
 
 关键校验函数：
 
 - `resolve_mime(filename, content_type)`：先看文件名后缀，其次看浏览器上报的 `content-type`；都不支持时抛 `ImageRejected`（只支持 jpg / png / webp）。
-- `check_size(size, settings)`：`size <= 0` 或 `size > settings.vision_max_bytes` 时抛 `ImageRejected`（提示最大支持的 MB 数）。
+- `check_size(size, settings)`：`size <= 0` 抛 `ImageRejected`（400）；`size > settings.vision_max_bytes` 抛 `ImageTooLarge`（413，提示最大支持的 MB 数）。
+- `sniff_mime(data)` / `verify_content(data, declared_mime)`：**文件头（magic bytes）嗅探**。后缀和 content-type 都能伪造——把 PDF 改名成 `.png` 曾能过掉前两道校验、直到调视觉模型才报错（表现为莫名 502）。现在先看文件头：识别不出 → 400；识别出但不是 jpg/png/webp、或与声称类型不一致 → 415；通过则返回真实 MIME。
 - 成功返回体：`{"text": 识别文本, "model": 使用的模型名, "filename", "mime", "size"}`。
 
-> 与项目统一约定：**API key 问题 / 模型失败统一返回 502**（而不是 500），把「服务侧的锅」与「用户图片不行的 400」明确区分开。
+> 与项目统一约定：**API key 问题 / 模型失败统一返回 502**（而不是 500），把「服务侧的锅」与「用户图片不行的 4xx」明确区分开；4xx 内部再按 400/413/415 分工，让前端能给出对症的提示。
