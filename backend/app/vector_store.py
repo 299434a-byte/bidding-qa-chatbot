@@ -397,7 +397,14 @@ class VectorStore:
     #   它只是个君子协定，Python 不会强制阻止，但看到下划线就该明白别乱用。
     # 【返回值为 -> None】表示只检查、不返回结果；发现问题的方式是「抛异常」。
     def _verify_dimension(self) -> None:
-        """集合维度与当前配置不一致时给出明确提示，而不是让检索悄悄报错。"""
+        """核对集合规格与当前配置：维度、距离算法、稀疏命名向量，不一致就给明确提示。
+
+        【为什么不只查维度（补校验的背景）】只查维度漏两种「换配置没重建库」的坑：
+        ① 距离算法被改过（比如从 Cosine 换成 Dot）——维度照样对得上，但分数口径全变，
+          检索结果排序悄悄错乱，比当场报错更难排查；
+        ② 集合是老版本建的、根本没有稀疏命名向量 bm25 —— dense 检索正常，
+          search_sparse 却会在运行时才炸。提前检查并提示重建，省大量排查时间。
+        """
         # 【这行在干什么】打开「接住岔子」的网，准备去读集合的配置信息（含维度）。
         # 【为什么这里允许失败】如果连「读集合配置」都失败了（库文件损坏等），
         #   说明问题已经严重到不是「维度不匹配」这种小事，让后面真正的操作去报错更合适。
@@ -426,12 +433,22 @@ class VectorStore:
             # 【专业词解释：getattr】「按名字取属性」的函数，等价于 obj.属性名，
             #   但它可以在属性不存在时给一个兜底值，因此更适合处理不确定的结构。
             actual = getattr(dense, "size", None)
+            # 【距离算法取值】新客户端放在 vector.config.distance（VectorParams.config），
+            # 老客户端直接挂在 vector.distance 上 —— 两处都找，都没有就拿 None（跳过这项检查）。
+            dense_cfg = getattr(dense, "config", None)
+            distance = getattr(dense_cfg, "distance", None)
+            if distance is None:
+                distance = getattr(dense, "distance", None)
+            # 【稀疏命名向量清单】Qdrant 把稀疏向量登记在 params.sparse_vectors（字典，
+            # 键是向量名）。老集合/老客户端可能没有这个字段（None）——那种情况下面跳过检查，
+            # 宁可少查一项，也不误伤正常库（与本方法一贯的宽容原则一致）。
+            sparse_cfg = getattr(info.config.params, "sparse_vectors", None)
         # 【这行在干什么】接住上面这一串「读配置」过程中可能出现的任何异常。
         except Exception:
             # 【这行在干什么】直接结束方法，什么都不做（连警告都不打）。
             # 【为什么这么宽容】理由同上：读不出来多半意味着库本身有更大的问题，
-            #   而这个方法的职责只是「顺手核对维度」，不该由它来把请求拦下来。
-            # 【注意事项】代价是：万一真的维度不一致、同时又读不出配置，这里会「悄悄放过」。
+            #   而这个方法的职责只是「顺手核对」，不该由它来把请求拦下来。
+            # 【注意事项】代价是：万一真的规格不一致、同时又读不出配置，这里会「悄悄放过」。
             #   但这种双重巧合概率极低，而且真正写入时 Qdrant 仍会报错兜住，属于可接受的取舍。
             return
         # 【这行在干什么】如果确实读到了维度（actual 不是 None/0），且它和配置不一致，就报错。
@@ -449,6 +466,22 @@ class VectorStore:
             raise VectorStoreError(
                 f"向量库现有维度为 {actual}，当前配置 EMBED_DIM={self.settings.embed_dim} 不一致。"
                 "请重建知识库（POST /api/ingest）以适配新模型。"
+            )
+        # 【距离算法核对】维度对得上但距离算法被改过，分数口径就变了（排序悄悄错乱）。
+        # 取值兼容枚举（Distance.COSINE）与纯字符串（"Cosine"）两种形态：
+        # getattr(distance, "value", distance) —— 是枚举就取它的 .value，否则原样。
+        if distance is not None and str(getattr(distance, "value", distance)).lower() != "cosine":
+            raise VectorStoreError(
+                f"向量库距离算法为 {getattr(distance, 'value', distance)}，当前配置要求 Cosine。"
+                "距离算法变更后检索分数口径不一致，请重建知识库（POST /api/ingest）。"
+            )
+        # 【稀疏命名向量核对】集合存在 sparse_vectors 字段但里面没有 "bm25"：
+        # 说明这是「只建了稠密向量」的旧集合，BM25 关键词检索会在运行时才炸。
+        # 字段不存在（None/非字典）时跳过——宁可少查一项也不误伤（老客户端不返回该字段）。
+        if isinstance(sparse_cfg, dict) and SPARSE_VECTOR_NAME not in sparse_cfg:
+            raise VectorStoreError(
+                f"向量库缺少稀疏命名向量「{SPARSE_VECTOR_NAME}」（旧版集合只建了稠密向量），"
+                "BM25 关键词检索将不可用。请重建知识库（POST /api/ingest）。"
             )
 
     # ------------------------------------------------------------------ #
