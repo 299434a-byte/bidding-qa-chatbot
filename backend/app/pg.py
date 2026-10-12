@@ -191,6 +191,13 @@ _START_RE = re.compile(r"^\s*(select|with)\b", re.IGNORECASE)
 _LIMIT_RE = re.compile(r"\blimit\s+(\d+)", re.IGNORECASE)
 # 只判断「有没有出现 LIMIT」（不管具体数字），用于决定要不要补 LIMIT。
 _LIMIT_ANY_RE = re.compile(r"\blimit\b", re.IGNORECASE)
+# LIMIT ALL：PostgreSQL 的「不限行数」写法——名义上写了 LIMIT，实际把整张表拉回来，
+# 必须识别出来替换成安全上限，不能当成「已有上限」放行。
+_LIMIT_ALL_RE = re.compile(r"\blimit\s+all\b", re.IGNORECASE)
+# FETCH FIRST n ROWS ONLY：SQL 标准的行数上限写法（等价于 LIMIT n）。
+# 里的 (\d+) 捕获可选数字：写了 n 就核对数字，没写数字也要认出这是「行数子句」，
+# 不能在它屁股后面再拼一个 LIMIT（两条行数子句叠加是语法错误）。
+_FETCH_FIRST_RE = re.compile(r"\bfetch\s+(?:first|next)\s+(?:(\d+)\s+)?rows?\s+only\b", re.IGNORECASE)
 # 用来剥掉大模型爱写的 markdown 代码围栏 ```sql ... ```。
 # 它匹配「开头的 ``` 加可选语言名」或「结尾的 ```」。
 _CODE_FENCE_RE = re.compile(r"^```[a-zA-Z]*\s*|\s*```$")
@@ -585,6 +592,77 @@ def _has_multiple_statements(sql: str) -> bool:
     return False
 
 
+# _scan_sql_text：扫描 SQL 文本，一次产出两样护栏要用的东西：
+#   1) 探测视图 —— 引号里的内容、注释里的内容换成等长空格。「等长」是关键：
+#      探测出的下标要能原样映射回原句去改写，长度一变下标就全错位。
+#      这样 WHERE note = 'no limit here' 这类常量、-- limit 这类注释，
+#      不会再骗过「有没有 LIMIT」的判定（它们不是真正的 LIMIT 子句）。
+#   2) 末尾注释起点 —— 引号外最后一个行尾注释（-- 或 //）的下标；没有则 None。
+# 引号规则与 _has_multiple_statements 保持一致：单/双引号支持成对转义（''、""）
+# 与反斜杠转义；反引号包标识符，内部不转义。
+def _scan_sql_text(sql: str) -> tuple[str, int | None]:
+    out = list(sql)
+    cut: int | None = None
+    quote: str | None = None
+    i, n = 0, len(sql)
+    while i < n:
+        ch = sql[i]
+        if quote is not None:
+            # 转义：反斜杠吃掉下一个字符；成对引号是引号自身的转义。
+            if ch == "\\" and quote != "`":
+                out[i] = " "
+                if i + 1 < n:
+                    out[i + 1] = " "
+                i += 2
+                continue
+            if ch == quote:
+                if i + 1 < n and sql[i + 1] == quote:
+                    out[i] = out[i + 1] = " "
+                    i += 2
+                    continue
+                quote = None
+                i += 1
+                continue
+            out[i] = " "
+            i += 1
+            continue
+        if ch in "'\"`":
+            quote = ch
+            i += 1
+            continue
+        # 行尾注释：-- 或 // 到行尾。记下起点（后出现的会覆盖，留最后一个），
+        # 注释内容在探测视图里全部抹成空格。
+        if sql[i : i + 2] in ("--", "//"):
+            cut = i
+            while i < n and sql[i] != "\n":
+                out[i] = " "
+                i += 1
+            continue
+        i += 1
+    return "".join(out), cut
+
+
+# _strip_trailing_comments：剥掉语句末尾的行尾注释（-- 或 // 到行尾）。
+# 为什么必须剥：补 LIMIT 是字符串拼接「… LIMIT 50」，若原句以 -- 注释结尾，
+# 拼上去的 LIMIT 会被注释整个吃掉（"SELECT 1 -- 说明 LIMIT 50"），上限形同虚设。
+# 为什么只剥「末尾」的：注释后面还有代码的（如 "… -- 说明\nFROM t"）不能切，
+# 否则会把 FROM t 一起删掉；那种情况 LIMIT 拼在最后一行，本来就不会被注释吃。
+# 连续多行末尾注释（每行一条）用循环剥干净。
+def _strip_trailing_comments(sql: str) -> str:
+    text = (sql or "").strip()
+    while text:
+        _, cut = _scan_sql_text(text)
+        if cut is None:
+            return text
+        tail = text[cut:]
+        nl = tail.find("\n")
+        # 注释跑完到行尾后，若后面还有非空白内容 → 不是「末尾注释」，别动。
+        if nl != -1 and tail[nl + 1 :].strip():
+            return text
+        text = text[:cut].rstrip()
+    return text
+
+
 # validate_sql：本模块的「规则检查员」——把模型生成的 SQL 过一遍护栏。
 # 合规就返回规范化后的 SQL，不合规就抛 PgError。
 # 检查顺序：非空 → 是否以 SELECT/WITH 开头 → 是否含禁用词 → 是否多条语句 →
@@ -606,16 +684,33 @@ def validate_sql(sql: str, max_rows: int) -> str:
     if _has_multiple_statements(sql):
         raise PgError("生成的语句包含多条语句，已拒绝执行")
 
-    # 没有 LIMIT：直接补一个。
-    if not _LIMIT_ANY_RE.search(sql):
+    # 补/改 LIMIT 之前先剥行尾注释：不然 "SELECT 1 -- 说明" 拼上 " LIMIT 50"，
+    # 补的上限会被注释吃掉（见 _strip_trailing_comments）。
+    sql = _strip_trailing_comments(sql)
+    # 判定用「探测视图」：常量/注释里的 limit 字样不算数（见 _scan_sql_text），
+    # 否则 WHERE note = 'no limit here' 会被当成「已有 LIMIT」而漏补上限。
+    probe, _ = _scan_sql_text(sql)
+    limit_all = _LIMIT_ALL_RE.search(probe)
+    fetch = _FETCH_FIRST_RE.search(probe)
+    if limit_all:
+        # LIMIT ALL = 名义上写了 LIMIT、实际不限行数 → 换成安全上限（不叠加新 LIMIT）。
+        sql = f"{sql[: limit_all.start()]}LIMIT {max_rows}{sql[limit_all.end():]}"
+    elif fetch:
+        # FETCH FIRST n ROWS ONLY：SQL 标准的行数上限 → 视为「已有上限」；
+        # 没写数字或数字超限，就把整段换成 LIMIT max_rows（也不叠加）。
+        if fetch.group(1) is None or int(fetch.group(1)) > max_rows:
+            sql = f"{sql[: fetch.start()]}LIMIT {max_rows}{sql[fetch.end():]}"
+    elif not _LIMIT_ANY_RE.search(probe):
+        # 没有 LIMIT：直接补一个。
         sql = f"{sql} LIMIT {max_rows}"
     else:
         # 有 LIMIT：找到所有「LIMIT 数字」，只处理最后一个（最靠近结尾的那个）。
-        matches = list(_LIMIT_RE.finditer(sql))
+        matches = list(_LIMIT_RE.finditer(probe))
         if matches:
             last = matches[-1]
             # 若数字大于上限，就把它替换成 max_rows。
             # 用切片拼接（sql[:位置] + 新值 + sql[位置:]）避免动到别处。
+            # 下标来自探测视图——它与原句等长，故可直接映射。
             if int(last.group(1)) > max_rows:
                 sql = f"{sql[: last.start(1)]}{max_rows}{sql[last.end(1):]}"
     return sql
@@ -714,10 +809,15 @@ def _run_pg(question: str, state: dict[str, Any]) -> str:
     由工具侧用 ``asyncio.to_thread`` 丢到工作线程执行，避免阻塞事件循环。
     """
     # 从 state 里取配置（连接信息等都在里面，全部来自 .env）。
-    s: Settings = state["settings"]
+    # 用 .get() 而不是 state["settings"]：后者在 state 没带 settings 时抛 KeyError，
+    # 而这个 KeyError 发生在 try 之外，会穿透「工具只返回可读提示、不向上抛异常」的承诺。
+    s: Settings | None = state.get("settings")
     # sql 先置空，方便异常分支里回填「到底有没有生成出 SQL」。
     sql: str | None = None
     try:
+        # 配置缺失当「预期内」错误处理，与其它失败走同一条可读提示通道。
+        if s is None:
+            raise PgError("工具未注入配置（state 缺少 settings），已跳过执行")
         # 1) 读（带缓存的）库结构，并渲染成文本。
         schema_text = render_schema_text(load_schema(s))
         # 2) 让大模型根据「问题 + 结构」生成 SQL。

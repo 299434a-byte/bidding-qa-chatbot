@@ -172,6 +172,12 @@ _LIMIT_RE = re.compile(r"\blimit\s+(\d+)", re.IGNORECASE)
 # 【这行在干什么】建一条正则，只判断"语句里有没有出现过 LIMIT 这个词"，不关心具体数字。
 # 【为什么需要它】用来判断"要不要给语句补一个 LIMIT"（完全没有 LIMIT 时才补）。
 _LIMIT_ANY_RE = re.compile(r"\blimit\b", re.IGNORECASE)
+# 【这两行在干什么】识别「假上限」的两种写法：
+#   · LIMIT ALL —— 名义上写了 LIMIT、实际不限行数（把整个图拉回来），必须换成安全上限；
+#   · FETCH FIRST n ROWS ONLY —— SQL 标准的行数上限写法，视为「已有上限」，
+#     没写数字或数字超限时把整段换成 LIMIT max_rows，绝不能在它后面再叠一个 LIMIT。
+_LIMIT_ALL_RE = re.compile(r"\blimit\s+all\b", re.IGNORECASE)
+_FETCH_FIRST_RE = re.compile(r"\bfetch\s+(?:first|next)\s+(?:(\d+)\s+)?rows?\s+only\b", re.IGNORECASE)
 # 【这行在干什么】建一条正则，用来剥掉大模型爱加的"markdown 代码围栏"。
 # 【什么是代码围栏】就是模型常把代码包成这样：
 #     ```cypher
@@ -181,10 +187,6 @@ _LIMIT_ANY_RE = re.compile(r"\blimit\b", re.IGNORECASE)
 # 【正则解释】^```[a-zA-Z]*\s* 匹配"开头的三个反引号 + 可选的语言名（如 cypher）+ 空白"；
 #   |\s*```$ 匹配"结尾的三个反引号"。中间那个 | 表示"或者"。
 _CODE_FENCE_RE = re.compile(r"^```[a-zA-Z]*\s*|\s*```$")
-# 【这行在干什么】建一条正则，用来删掉整行的"注释"（以 // 开头的行）。
-# 【为什么用 re.MULTILINE】这个开关让 ^ 和 $ 能匹配"每一行的开头/结尾"，而不是整个文本的开头结尾，
-#   这样"逐行删除注释行"才生效。
-_COMMENT_LINE_RE = re.compile(r"^\s*//.*$", re.MULTILINE)
 
 # schema 缓存：键为 (uri, database)，值为 (取到的时间戳, 结构字典)
 # ----------------------------------------------------------------------------
@@ -612,6 +614,113 @@ def build_cypher_messages(question: str, schema_text: str, max_rows: int) -> lis
     ]
 
 
+# 【这个函数在干什么】扫描 Cypher 文本，一次产出两样护栏要用的东西：
+#   1) 探测视图 —— 引号/反引号里的内容、注释里的内容换成等长空格。「等长」是关键：
+#      探测出的下标要能原样映射回原句去改写，长度一变下标就全错位。
+#      这样 WHERE n.name = 'no limit here' 这类常量、// limit 这类注释，
+#      不会再骗过「有没有 LIMIT」的判定（它们不是真正的 LIMIT 子句）。
+#   2) 末尾注释起点 —— 引号外最后一个行尾注释（// 或 --）的下标；没有则 None。
+# 【引号规则】与 _has_multiple_statements 保持一致：单/双引号支持转义，反引号包名字。
+def _scan_cypher_text(cypher: str) -> tuple[str, int | None]:
+    out = list(cypher)
+    cut: int | None = None
+    quote: str | None = None
+    i, n = 0, len(cypher)
+    while i < n:
+        ch = cypher[i]
+        if quote is not None:
+            # 转义：反斜杠吃掉下一个字符；成对引号是引号自身的转义。
+            if ch == "\\" and quote != "`":
+                out[i] = " "
+                if i + 1 < n:
+                    out[i + 1] = " "
+                i += 2
+                continue
+            if ch == quote:
+                if i + 1 < n and cypher[i + 1] == quote:
+                    out[i] = out[i + 1] = " "
+                    i += 2
+                    continue
+                quote = None
+                i += 1
+                continue
+            out[i] = " "
+            i += 1
+            continue
+        if ch in "'\"`":
+            quote = ch
+            i += 1
+            continue
+        # 行尾注释：// 或 -- 到行尾。记下起点（后出现的会覆盖，留最后一个）。
+        if cypher[i : i + 2] in ("//", "--"):
+            cut = i
+            while i < n and cypher[i] != "\n":
+                out[i] = " "
+                i += 1
+            continue
+        i += 1
+    return "".join(out), cut
+
+
+# 【这个函数在干什么】剥掉行注释（// 或 --）：整行的删掉整行，行尾的删到行尾。
+# 【关键】引号里的 // 不是注释（例如 n.url = 'http://example.com' 里的双斜杠），
+#   所以必须像 _has_multiple_statements 那样逐字符跟踪引号状态，不能用正则一刀切。
+# 【返回值】去掉全部行注释后的文本（换行保留）。
+def _strip_line_comments(text: str) -> str:
+    out: list[str] = []
+    quote: str | None = None
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if quote is not None:
+            out.append(ch)
+            if ch == "\\" and quote != "`" and i + 1 < n:
+                out.append(text[i + 1])
+                i += 2
+                continue
+            if ch == quote:
+                if i + 1 < n and text[i + 1] == quote:
+                    out.append(text[i + 1])
+                    i += 2
+                    continue
+                quote = None
+            i += 1
+            continue
+        if ch in "'\"`":
+            quote = ch
+            out.append(ch)
+            i += 1
+            continue
+        if text[i : i + 2] in ("//", "--"):
+            # 注释内容丢弃，直到行尾；换行符本身留下（下一轮正常追加）。
+            while i < n and text[i] != "\n":
+                i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+# 【这个函数在干什么】剥掉语句「末尾」的行尾注释（// 或 -- 到行尾）。
+# 【为什么必须剥】补 LIMIT 是字符串拼接「… LIMIT 50」，若原句以 // 注释结尾，
+#   拼上去的 LIMIT 会被注释整个吃掉（"MATCH … // 说明 LIMIT 50"），上限形同虚设。
+# 【为什么只剥「末尾」的】注释后面还有代码的不能切，否则会把后面的子句一起删掉；
+#   那种情况 LIMIT 拼在最后一行，本来就不会被注释吃。连续多行末尾注释循环剥干净。
+def _strip_trailing_comments(cypher: str) -> str:
+    text = (cypher or "").strip()
+    while text:
+        _, cut = _scan_cypher_text(text)
+        if cut is None:
+            return text
+        tail = text[cut:]
+        nl = tail.find("\n")
+        # 注释跑完到行尾后，若后面还有非空白内容 → 不是「末尾注释」，别动。
+        if nl != -1 and tail[nl + 1 :].strip():
+            return text
+        text = text[:cut].rstrip()
+    return text
+
+
 # 【这个函数在干什么】清洗模型生成的 Cypher：剥掉代码围栏、行注释、结尾分号。
 # 【为什么需要清洗】大模型输出"不总是听话"：即使要求了"不要 markdown 代码块"，
 #   它仍可能加上 ```cypher ... ```，或在结尾多写个分号。这些都会让执行失败，必须提前剥掉。
@@ -625,8 +734,9 @@ def clean_cypher(raw: str) -> str:
     # 【这行在干什么】用正则把 markdown 代码围栏（``` 那两行）删掉，再去除首尾空白。
     # 【sub 是什么】re.sub(模式, 替换成什么, 原文) —— 把匹配到的内容替换掉；这里替换成空串=删除。
     text = _CODE_FENCE_RE.sub("", text).strip()
-    # 【这行在干什么】把整行注释（// 开头）删掉。
-    text = _COMMENT_LINE_RE.sub("", text)
+    # 【这行在干什么】把行注释删掉——整行的、行尾的都要（以前只删整行，行尾注释会把
+    #   后面补的 " LIMIT 50" 整个吃掉）。引号里的 // 不会被误伤，见 _strip_line_comments。
+    text = _strip_line_comments(text)
     # 【这行在干什么】把结尾的"分号或空白"统统删掉（防止结尾多个分号或空格）。
     # 【正则解释】[;\s]+$ 表示"一个或多个分号/空白字符，出现在结尾（$）"。
     text = re.sub(r"[;\s]+$", "", text)
@@ -724,13 +834,31 @@ def validate_cypher(cypher: str, max_rows: int) -> str:
     if _has_multiple_statements(cypher):
         raise GraphError("生成的语句包含多条语句，已拒绝执行")
 
+    # 【这行在干什么】补/改 LIMIT 之前先剥行尾注释：不然 "MATCH … // 说明" 拼上
+    #   " LIMIT 50"，补的上限会被注释吃掉（见 _strip_trailing_comments）。
+    cypher = _strip_trailing_comments(cypher)
+    # 【这行在干什么】判定用「探测视图」：常量/注释里的 limit 字样不算数
+    #   （见 _scan_cypher_text），否则 WHERE n.name = 'no limit here' 会被当成
+    #   「已有 LIMIT」而漏补上限，整个图被拉回来。
+    probe, _ = _scan_cypher_text(cypher)
+    limit_all = _LIMIT_ALL_RE.search(probe)
+    fetch = _FETCH_FIRST_RE.search(probe)
+    # 【LIMIT ALL】名义上写了 LIMIT、实际不限行数 → 换成安全上限（不叠加新 LIMIT）。
+    if limit_all:
+        cypher = f"{cypher[: limit_all.start()]}LIMIT {max_rows}{cypher[limit_all.end():]}"
+    # 【FETCH FIRST n ROWS ONLY】视为「已有上限」；没写数字或数字超限就把整段换成
+    #   LIMIT max_rows —— 同样不叠加，两条行数子句叠起来是语法错误。
+    elif fetch:
+        if fetch.group(1) is None or int(fetch.group(1)) > max_rows:
+            cypher = f"{cypher[: fetch.start()]}LIMIT {max_rows}{cypher[fetch.end():]}"
     # 【这行在干什么】如果语句里压根没有 LIMIT，就给它补一个安全的 LIMIT。
-    if not _LIMIT_ANY_RE.search(cypher):
+    elif not _LIMIT_ANY_RE.search(probe):
         cypher = f"{cypher} LIMIT {max_rows}"
     # 【这行在干什么】否则（本来就有 LIMIT），检查它是不是太大了，大就改小。
     else:
         # 【这行在干什么】用 finditer 找出所有"LIMIT 数字"的位置和内容（可能有多个，如子查询里也有）。
-        matches = list(_LIMIT_RE.finditer(cypher))
+        #   下标来自探测视图——它与原句等长，故可直接映射回原句改写。
+        matches = list(_LIMIT_RE.finditer(probe))
         # 【这行在干什么】如果确实找到了 LIMIT 数字：
         if matches:
             # 【这行在干什么】取最后一个匹配（最外层、也就是最终生效的那个）。
@@ -884,12 +1012,17 @@ def _run_graph(question: str, state: dict[str, Any]) -> str:
     由工具侧用 ``asyncio.to_thread`` 丢到工作线程执行，避免阻塞事件循环。
     """
     # 【这行在干什么】从状态字典里取出配置对象，并标注类型是 Settings。
-    s: Settings = state["settings"]
+    # 【为什么用 .get() 而不是 state["settings"]】后者在 state 没带 settings 时抛 KeyError，
+    #   而这个 KeyError 发生在 try 之外，会穿透「工具只返回可读提示、不向上抛异常」的承诺。
+    s: Settings | None = state.get("settings")
     # 【这行在干什么】先声明 cypher 变量并置空（后面成功时会赋值；失败时它可能仍是 None，
     #   好让上层知道"压根没生成出语句"）。
     cypher: str | None = None
     # 【下面这段在干什么】整条流水线，任何一步出问题都转成"可读失败提示"。
     try:
+        # 【这行在干什么】配置缺失当「预期内」错误处理，与其它失败走同一条可读提示通道。
+        if s is None:
+            raise GraphError("工具未注入配置（state 缺少 settings），已跳过执行")
         # 【这行在干什么】读图谱结构（带 TTL 缓存），并渲染成给模型看的文本。
         schema_text = render_schema_text(load_schema(s))
         # 【这行在干什么】让模型把问题翻译成 Cypher。
