@@ -35,6 +35,8 @@ frontend/next-env.d.ts
 data/qdrant/
 # BM25 索引（由建库命令生成）
 data/bm25_index.json
+# 知识库版本指纹（每次建库成功后重写，可由 python -m app.ingest 随时再生成）
+data/kb_version.txt
 # SQLite 对话历史库
 data/*.db
 data/*.db-journal
