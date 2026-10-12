@@ -73,6 +73,9 @@ from __future__ import annotations
 #   把同步阻塞的查询逻辑丢到旁支线程去跑（否则会卡住整个服务，详见文件末尾注释）。
 import asyncio
 
+# atexit：注册「进程退出时自动关闭缓存驱动」的关闭钩子（见 _close_drivers）。
+import atexit
+
 # 【这行在干什么】引入 json 模块，用来把字典序列化成 JSON 文本（渲染节点样例时用）。
 import json
 
@@ -230,10 +233,10 @@ class GraphError(RuntimeError):
 #   · s —— 配置对象（要从中读连接地址、账号密码、库名、超时）。
 # 【返回值】一个 Neo4j 驱动对象（可以理解为"通往数据库的连接工厂"）。
 def _get_driver(s: Settings):
-    """取（并缓存）连接驱动。``connection_timeout`` 限制建连时间。"""
+    """取（并缓存）连接驱动。``connection_timeout`` 限制建连时间；全程只读访问。"""
     # 【下面这段在干什么】尝试导入 neo4j 库。
     try:
-        from neo4j import GraphDatabase
+        from neo4j import GraphDatabase, READ_ACCESS
     # 【下面这段在干什么】如果没装 neo4j 包（ImportError），就抛一个"人话版"错误。
     # 【为什么用 raise ... from exc】from exc 会把原始错误"挂"在新错误上（这叫异常链），
     #   这样既给出了友好提示，又保留了排错线索。
@@ -253,13 +256,18 @@ def _get_driver(s: Settings):
             # 【参数逐个解释】
             #   · s.neo4j_uri      —— 连接地址（形如 bolt://主机:端口），来自 .env；
             #   · auth=(用户, 密码) —— 认证信息，同样来自 .env，绝不硬编码；
+            #   · default_access_mode=READ_ACCESS —— 会话默认「只读访问模式」：
+            #       整个模块只做查询，这样连 _introspect_rows 那种 session.run（自动提交、
+            #       不走 execute_read）也被服务端按只读对待，写操作一律被拒；
             #   · connection_timeout=max(1, s.neo4j_timeout)      —— 建立连接的最长等待秒数
-            #       （用 max(1, ...) 兜底，防止配置成 0 或负数导致立刻超时）；
+            #       （用 max(1, ...) 兜底，防止配置成 0 或负数导致立刻超时）。
+            #       注意：它只管「建连」，管不住「一条查询跑多久」——查询上限见 _query；
             #   · max_transaction_retry_time=max(1, s.neo4j_timeout) —— 事务重试的总时长上限，
             #       同样兜底到至少 1 秒。
             driver = GraphDatabase.driver(
                 s.neo4j_uri,
                 auth=(s.neo4j_user, s.neo4j_password),
+                default_access_mode=READ_ACCESS,
                 connection_timeout=max(1, s.neo4j_timeout),
                 max_transaction_retry_time=max(1, s.neo4j_timeout),
             )
@@ -272,6 +280,33 @@ def _get_driver(s: Settings):
         _drivers[key] = driver
     # 【这行在干什么】返回驱动（不管是缓存里拿的还是刚建的）。
     return driver
+
+
+# 【这个函数在干什么】关闭缓存里的全部驱动并清空缓存。
+# 【为什么需要】驱动是长连接对象，进程退出前应显式关闭（否则 Windows 上可能拖慢退出、
+#   或留下未释放的连接）。既作为 atexit 退出钩子，测试里也能直接调用断言。
+def _close_drivers() -> None:
+    for driver in list(_drivers.values()):
+        try:
+            driver.close()
+        except Exception:  # noqa: BLE001 - 退出钩子里绝不抛异常
+            pass
+    _drivers.clear()
+
+
+# 【这行在干什么】注册进程退出钩子：Python 正常退出时自动关闭缓存的驱动。
+atexit.register(_close_drivers)
+
+
+# 【这个函数在干什么】把 Cypher 包成带「事务超时」的 Query 对象（真正的查询上限）。
+# 【为什么不用 NEO4J_TIMEOUT】那只管建连与事务重试，管不住「一条查询跑多久」；
+#   慢查询会一直挂着占连接。查询上限用事务超时：服务端到点终止执行（Query 的 timeout）。
+# 【timeout=None 的含义】配置为 0/负数 = 不限时（Neo4j 的 Query 约定：None 用库默认值）。
+def _query(cypher: str, s: Settings):
+    from neo4j import Query
+
+    seconds = s.neo4j_query_timeout
+    return Query(cypher, timeout=float(seconds) if seconds and seconds > 0 else None)
 
 
 # 【这个函数在干什么】拿一个"会话"（session）——可以把会话理解成"一次可用的工作窗口"。
@@ -301,9 +336,11 @@ def _read_rows(s: Settings, cypher: str) -> list[dict[str, Any]]:
             # 【这行在干什么】execute_read 表示"在只读事务里执行"；
             #   它接收一个小函数（lambda），该函数拿到事务对象 tx 后，跑我们的语并取回数据。
             # 【lambda 是什么】一种"临时的一次性小函数"，写法紧凑；
-            #   这里 `lambda tx: tx.run(cypher).data()` 等价于"给我一个事务，我就执行语句并取数据"。
+            #   这里 `lambda tx: tx.run(query).data()` 等价于"给我一个事务，我就执行语句并取数据"。
+            # 【为什么要用 _query 包一层】给语句带上「事务超时」——查询跑多久的真正上限。
             # 【.data() 干什么】把查询结果转成"列表套字典"的普通 Python 结构，方便后续处理。
-            return session.execute_read(lambda tx: tx.run(cypher).data())
+            query = _query(cypher, s)
+            return session.execute_read(lambda tx: tx.run(query).data())
     # 【下面这段在干什么】如果是我们自己抛的 GraphError，原样继续往上抛（不重复包装）。
     except GraphError:
         raise
@@ -321,12 +358,14 @@ def _read_rows(s: Settings, cypher: str) -> list[dict[str, Any]]:
 #   · 本函数         执行的是"由代码写死"的语句（固定不动的几句）→ 不存在越界风险，
 #     所以直接用普通的 session.run 即可。
 #   换句话说：**语句来源不同，安全等级要求也就不同**——固定语句不必走只读事务。
+# 【但仍然要两道保险】驱动开了 default_access_mode=READ（服务端按只读对待一切会话语句），
+#   语句再包 _query 带上事务超时——自省查询也不能无限跑。
 def _introspect_rows(s: Settings, cypher: str) -> list[dict[str, Any]]:
     """执行**固定**的结构自省语句（语句由代码写死，不由模型生成）。"""
     try:
         with _session(s) as session:
-            # 【这行在干什么】直接执行语句并取回数据（"列表套字典"）。
-            return session.run(cypher).data()
+            # 【这行在干什么】直接执行语句并取回数据（"列表套字典"），带事务超时。
+            return session.run(_query(cypher, s)).data()
     except GraphError:
         raise
     except Exception as exc:  # noqa: BLE001 - 统一转成可读提示

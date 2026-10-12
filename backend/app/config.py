@@ -482,8 +482,13 @@ class Settings:
     neo4j_password: str
     # 【这行在干什么】Neo4j 的数据库名（默认 neo4j）；从 NEO4J_DATABASE 读。
     neo4j_database: str
-    # 【这行在干什么】查询超时秒数；从 NEO4J_TIMEOUT 读。
+    # 【这行在干什么】建连/事务重试超时秒数；从 NEO4J_TIMEOUT 读。
+    # 【注意】它不是「一条查询能跑多久」的上限——查询上限看 neo4j_query_timeout。
     neo4j_timeout: int
+    # 【这行在干什么】单条查询的事务超时秒数（服务端到点终止）；从 NEO4J_QUERY_TIMEOUT 读。
+    # 【为什么单独一项】NEO4J_TIMEOUT 只管建连，慢查询需要独立的执行时长上限；
+    #   配成 0 或负数 = 不限时（沿用 Neo4j 库默认）。
+    neo4j_query_timeout: int
     # 【这行在干什么】图谱查询结果最多返回多少行；从 NEO4J_MAX_ROWS 读。
     neo4j_max_rows: int
     # 【这行在干什么】生成 Cypher 查询语句用的模型（留空回落主模型）。
@@ -851,6 +856,7 @@ def _build_settings() -> Settings:
         neo4j_password=_str("NEO4J_PASSWORD"),
         neo4j_database=_str("NEO4J_DATABASE", "neo4j"),
         neo4j_timeout=_int("NEO4J_TIMEOUT", 30),
+        neo4j_query_timeout=_int("NEO4J_QUERY_TIMEOUT", 30),
         neo4j_max_rows=_int("NEO4J_MAX_ROWS", 50),
         graph_model=_str("GRAPH_MODEL"),
         graph_max_tokens=_int("GRAPH_MAX_TOKENS", 3072),
