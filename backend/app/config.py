@@ -576,6 +576,15 @@ class Settings:
     # 【这行在干什么】日志文件路径；从 LOG_FILE_PATH 读。默认落在 backend/data/app.log。
     log_file_path: Path
 
+    # 【这行在干什么】纯注释，标出下面一组字段属于「应用层限流」配置。
+    # 应用层限流（内存令牌桶，见 app/ratelimit.py）
+    # 【这行在干什么】令牌桶容量：单个「IP+用户」键瞬时允许的突发请求次数（默认 10）；
+    #   从 RATELIMIT_CAPACITY 读。
+    ratelimit_capacity: int
+    # 【这行在干什么】每秒补充的令牌数（默认 0.5 = 每 2 秒回 1 枚，稳态约 30 次/分钟）；
+    #   从 RATELIMIT_REFILL_PER_SEC 读。
+    ratelimit_refill_per_sec: float
+
     # 【这行在干什么】纯注释，标出下面一组字段属于「跨域（CORS）」配置。
     # 跨域（CORS）—— 允许哪些前端来源跨域调用本 API
     # 【这行在干什么】跨域来源白名单；从 CORS_ORIGINS 读（逗号分隔）。
@@ -899,6 +908,11 @@ def _build_settings() -> Settings:
         # 【这行在干什么】日志级别，默认 INFO。
         log_level=_str("LOG_LEVEL", "INFO"),
         log_file_path=_path("LOG_FILE_PATH", "./backend/data/app.log"),
+        # ---------------- 应用层限流 ---------------- #
+        # 【这行在干什么】令牌桶容量与每秒补充数，默认值与改造前的模块常量一致（10 / 0.5），
+        #   外置成配置只为让 README「配置全部集中在 .env」这句话成立，行为零变化。
+        ratelimit_capacity=_int("RATELIMIT_CAPACITY", 10),
+        ratelimit_refill_per_sec=_float("RATELIMIT_REFILL_PER_SEC", 0.5),
         # ---------------- 跨域（CORS） ---------------- #
         cors_origins=cors_origins,
         # ---------------- 深度推理模式 ---------------- #

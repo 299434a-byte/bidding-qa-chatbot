@@ -35,12 +35,19 @@ from fastapi import Depends, HTTPException, Request
 
 # auth.optional_user：复用既有的「读登录态」依赖——登录了算「用户」维度，没登录算匿名。
 from . import auth
+# get_settings：限流参数已外置到 .env（此前是本文件的硬编码常量，
+# 与 README「配置全部集中在 .env」的说法打架）。
+from .config import get_settings
 
 # 桶容量：单个键瞬时允许的突发请求次数（攒满后的第一波连打上限）。
-_CAPACITY = 10
-# 每秒补充的令牌数：0.5 = 每 2 秒回 1 枚，折合每分钟约 30 次的稳态速率。
+# 【为什么在模块导入时读一次】settings 是带缓存的单例（load 一次后直接复用），
+# 模块常量保留下列名不变，既让 tests/test_ratelimit.py 的 `ratelimit._CAPACITY`
+# 继续可用，也让「改 .env 重启生效」的语义与其它配置一致。
+_CAPACITY = get_settings().ratelimit_capacity
+# 每秒补充的令牌数：默认 0.5 = 每 2 秒回 1 枚，折合每分钟约 30 次的稳态速率。
 # 正常用户一轮问答才 1~2 个请求，离这个线很远；只有脚本式连打才会被拦下。
-_REFILL_PER_SEC = 0.5
+# （RATELIMIT_REFILL_PER_SEC，见 .env.example）
+_REFILL_PER_SEC = get_settings().ratelimit_refill_per_sec
 
 
 class _Bucket:
