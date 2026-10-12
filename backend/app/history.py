@@ -931,8 +931,10 @@ def append_message(
     首个用户提问会自动成为会话标题，避免出现一堆「新对话」。
     """
     ensure_schema(settings)
-    # 按上限截断正文（_clip_len 返回上限值，切片 [:] 超范围也不会报错）。
-    text = (content or "")[:_clip_len(settings)]
+    # 按上限截断正文。_clip_len 返回 0 表示「不限制」——注意不能直接 content[:limit]，
+    # 否则 limit=0 时切片 [:0] 会把正文静默清空成空串（与 _clip「limit<=0 不限制」同义）。
+    limit = _clip_len(settings)
+    text = (content or "")[:limit] if limit > 0 else (content or "")
     now = _now()
     message_id = _new_id()
 
@@ -1001,6 +1003,7 @@ def append_message(
 
 
 # _clip_len：取出「单条消息正文长度上限」；配置为 0 或负数时返回 0（表示不限制）。
+# 语义与 _clip 一致：返回值 0（或负数）= 不限制，调用处必须按「limit>0 才截」处理。
 def _clip_len(settings: Settings) -> int:
     limit = settings.history_max_message_chars
     return limit if limit and limit > 0 else 0
