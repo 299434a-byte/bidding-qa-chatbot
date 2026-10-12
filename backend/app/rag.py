@@ -87,13 +87,15 @@ from .rerank import rerank_hits
 #   · retrieve —— 混合检索的主入口（dense 语义路 + BM25 字面路 → RRF 融合）。
 from .retriever import RetrievalResult, retrieve
 
-# 【这行在干什么】引入引用校验器的两个函数。
+# 【这行在干什么】引入引用校验器的两个函数和「检索为空」的标准话术。
 # 【为什么需要】回答已通过 SSE 流式发到前端、无法撤回，只能在生成完之后补做一次「引用体检」：
 #   发现引用了不存在的来源、或数字没依据时，产出修订稿让前端覆盖展示。
 # 【参数逐个解释】
 #   · verify_citations —— 校验回答里的引用编号与数字有没有依据（不联网、纯本地）；
-#   · strip_bad_refs —— 只把「校验没通过」的引用标记删掉，通过的保持原样。
-from .citation import strip_bad_refs, verify_citations
+#   · strip_bad_refs —— 只把「校验没通过」的引用标记删掉，通过的保持原样；
+#   · REF_1_RETRIEVAL_EMPTY —— citation.py 里「检索了但没找到」的统一用户话术，
+#     NO_DATA_MESSAGE 直接以它开头（此前这组 REF 常量只有测试引用，是零生产调用的死代码）。
+from .citation import REF_1_RETRIEVAL_EMPTY, strip_bad_refs, verify_citations
 
 # 【这行在干什么】定义系统提示词 SYSTEM_PROMPT：写给大模型看的「工作守则」。
 # 【为什么它如此重要】大模型本身是个「什么都知道」的通才，但招投标问答要求「只信资料、
@@ -115,16 +117,17 @@ SYSTEM_PROMPT = """你是「招投标智能问答助手」，服务对象是招�
 # 【这行在干什么】定义知识库为空时的统一提示文案 NO_DATA_MESSAGE。
 # 【为什么单独定义成常量（关键设计）】「知识库是空的」这个场景在 /api/chat 和 Agent
 #   两条链路里都可能出现，把文案抽出来共用，保证两处说法一致、只改一处即可生效。
-# 【内容拆解】文案分三部分：先直说「没有可用数据」；再给出两个可能原因（表是空的 /
-#   数据灌了但没重建库）；最后给出解决办法（后台点重建 / 命令行跑 ingest）。
+# 【文案怎么拼的】前半段直接复用 citation.py 的 REF_1_RETRIEVAL_EMPTY ——
+#   用户话术（「已检索但没找到 + 换个问法」）在两处保持一字不差；
+#   后半段是运维向的追加提示（表是空的 / 没重建库 → 怎么重建），
+#   这部分属于部署排障信息，REF 常量里没有，所以拼在后面。
 # 【注意事项】这里的反引号 ``bidding_notices`` 是 Markdown 代码样式，前端按 Markdown
 #   渲染时会被显示成等宽字体，纯文本环境下则会原样显示两个反引号——可接受。
 NO_DATA_MESSAGE = (
-    "知识库当前没有可用数据，无法给出有依据的回答。\n\n"
-    "可能的原因：\n"
-    "1. `bidding_notices` / `bidding_project` / `companies` 三张表还是空的；\n"
-    "2. 数据已灌入，但还没有重建知识库。\n\n"
-    "请在后台点击「重建知识库」，或执行 `python -m app.ingest`（需先停掉后端服务）。"
+    f"{REF_1_RETRIEVAL_EMPTY}\n\n"
+    "（若三张源表 `bidding_notices` / `bidding_project` / `companies` 为空，"
+    "或数据已灌入但尚未建库，请在后台点击「重建知识库」，"
+    "或执行 `python -m app.ingest`（需先停掉后端服务）。）"
 )
 
 

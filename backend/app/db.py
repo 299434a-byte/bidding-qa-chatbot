@@ -11,8 +11,7 @@
 # 【谁调用它（上游）】
 #   backend/app/ingest.py —— 建库管道：
 #     · discover_schema() 拿表结构（列名/类型/注释/主键/行数）；
-#     · iter_rows() 一行一行取数据；
-#     · describe_columns() 拿「列名 → 中文展示名」的映射。
+#     · iter_rows() 一行一行取数据。
 #   backend/app/main.py —— /api/tables 之类的接口也可能调用 list_tables() 做排查。
 #
 # 【它给谁用（下游）】
@@ -517,42 +516,6 @@ def iter_rows(
                 #   全程内存里只有「当前这一行」，大表也不会爆内存。
                 #   而若改成「全部收集后 return」，就等于把整个表读进内存，白费了流式游标的优势。
                 yield normalize_row(row)
-
-
-# 【这行在干什么】定义函数 describe_columns：返回「列名 → 展示用中文名」的映射。
-# 【参数逐个解释】
-#   · conn —— 已建立的数据库连接；
-#   · table —— 要查的表名。
-# 【返回值】一个字典，键是数据库列名，值是「适合展示的中文名」。
-# 【为什么需要它（关键设计）】前端展示、生成检索文本时，直接显示 project_name 这种
-#   英文列名对业务人员不友好。数据库里通常给每个字段写了中文注释（COLUMN_COMMENT），
-#   优先用注释当展示名；若某字段没写注释，就退而用字段名本身兜底。
-#   这样「中文展示名」全部来自数据库配置，代码里不写死任何业务字段名（呼应项目硬约束）。
-def describe_columns(conn: pymysql.connections.Connection, table: str) -> dict[str, str]:
-    """返回 {列名: 展示用中文名} 映射，优先用列注释。"""
-    # 【这行在干什么】创建默认游标（字典形式，可按列名取值），块结束自动关闭。
-    with conn.cursor() as cur:
-        # 【这行在干什么】查询这张表所有列的「列名 + 注释」。
-        # 【WHERE/ORDER BY 解释】同 discover_schema：只看当前库、限定这张表、按列顺序返回。
-        # 【参数解释】(table,) —— 单元素元组，对应 SQL 里的 %s 占位符，防注入。
-        cur.execute(
-            """
-            SELECT COLUMN_NAME, COLUMN_COMMENT
-            FROM information_schema.COLUMNS
-            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s
-            ORDER BY ORDINAL_POSITION
-            """,
-            (table,),
-        )
-        # 【这行在干什么】把结果整理成「列名 → 中文名」的字典。
-        # 【写法拆解】字典推导式，遍历每一行 r：
-        #   · 键是 r["COLUMN_NAME"]（数据库列名）；
-        #   · 值是一段「取中文名」的表达式，从右往左读：
-        #     ① (r["COLUMN_COMMENT"] or "") —— 注释可能是 NULL，用 or "" 兜底成空串；
-        #     ② .strip() —— 去掉注释首尾空白；
-        #     ③ ... or r["COLUMN_NAME"] —— 若注释清理后是空（没写注释），
-        #        就用列名本身当展示名兜底，保证「任何列都有一个名字可用」。
-        return {r["COLUMN_NAME"]: (r["COLUMN_COMMENT"] or "").strip() or r["COLUMN_NAME"] for r in cur.fetchall()}
 
 
 # 【这行在干什么】定义函数 list_tables：列出当前库下所有的表（含近似行数）。
