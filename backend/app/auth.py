@@ -133,6 +133,13 @@ class RateLimited(AuthError):
     """登录失败次数过多，暂时锁定。"""
 
 
+# 拿不到合法令牌时抛这个（头缺失 / 格式不对 / 令牌为空）；上层捕获后应返回 401。
+# 它是 AuthError 的子类，但语义是「未登录」而不是「请求格式有错」——
+# _auth_errors 必须先接它再接 AuthError，才能翻成 401 而不是 400。
+class Unauthorized(AuthError):
+    """拿不到合法令牌（头缺失 / 格式不对 / 令牌为空），上层应返回 401。"""
+
+
 # _require_enabled：检查「账号体系」这个功能开关有没有打开。
 # 没打开就抛 AuthUnavailable，让上层返回 503，而不是稀里糊涂继续跑。
 def _require_enabled(settings: Settings) -> None:
@@ -357,9 +364,13 @@ def login(
 
 
 # logout：注销（把当前令牌删掉）。
+# 没有令牌就不算「注销成功」——抛 Unauthorized（翻译成 401），绝不静默返回。
 def logout(settings: Settings, raw: str | None) -> None:
     _require_enabled(settings)
-    # 删除令牌对应的会话记录。
+    if not raw:
+        raise Unauthorized("未登录或登录已过期，请重新登录")
+    # 删除令牌对应的会话记录。删除是幂等的：令牌已被删过再删一次也照常成功
+    # （DELETE 影响 0 行不算错），重复注销不会抛异常。
     revoke_token(settings, raw)
 
 
@@ -421,6 +432,12 @@ def current_user(
 
 
 # require_bearer：从请求头里取出「原始令牌」，注销接口用它来删对应会话。
-def require_bearer(authorization: str | None) -> str | None:
-    """从 Header 里取出原始令牌（注销时用）。"""
-    return _bearer(authorization)
+# 拿不到合法令牌（头缺失 / 格式不对 / 抠出来是空）就抛 Unauthorized ——
+# 上层 _auth_errors 翻译成 401。绝不返回 None 让调用方「以为拿到了」：
+# 注销若拿着 None 继续跑，会变成「什么都没吊销却返回成功」。
+def require_bearer(authorization: str | None) -> str:
+    """从 Header 里取出原始令牌；拿不到合法令牌抛 Unauthorized（翻译成 401）。"""
+    raw = _bearer(authorization)
+    if not raw:
+        raise Unauthorized("未登录或登录已过期，请重新登录")
+    return raw

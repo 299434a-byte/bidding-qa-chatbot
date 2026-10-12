@@ -443,6 +443,10 @@ async function authFetch(path: string, init?: RequestInit): Promise<Response> {
   if (token) headers.set("Authorization", `Bearer ${token}`);
   const res = await fetch(`${API_BASE}${path}`, { cache: "no-store", ...init, headers });
   if (!res.ok) {
+    // 401 = 本地令牌已不被服务端认可（缺失/格式错/过期/已注销）。
+    // 这里顺手清掉本地令牌做「双保险」：即使调用方忘了清，也不能让一个
+    // 已失效的令牌一直躺在 localStorage 里冒充登录态（注销接口尤其如此）。
+    if (res.status === 401) clearToken();
     let detail = `${res.status} ${res.statusText}`;
     try {
       const body = await res.json();
@@ -503,7 +507,7 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ username, password }),
     }),
-  /** 注销（令牌失效即可） */
+  /** 注销：通知后端作废令牌。收到 401（令牌本就失效）也已在 authFetch 里清掉本地令牌 */
   logout: () => authReq<{ ok: boolean; username: string }>("/api/auth/logout", { method: "POST" }),
   /** 查询当前登录用户 */
   me: () => authReq<{ user: User }>("/api/auth/me"),

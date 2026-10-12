@@ -1034,6 +1034,10 @@ def _auth_errors() -> Iterator[None]:
         # 429 让前端能区分「口令错」与「被锁定」
         # （连续多次口令错误会触发达次数限制，此时不是用户输错了，而是被暂时锁定）。
         raise HTTPException(status_code=429, detail=str(exc)) from exc
+    # 拿不到合法令牌 → 401（未登录）。注意必须写在 AuthError 之前：
+    # Unauthorized 是 AuthError 的子类，写反了会被下面那条翻成 400。
+    except auth.Unauthorized as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
     # 其余账号类错误（用户名不合规、口令太短、用户名已存在等）→ 400（请求有问题）。
     except auth.AuthError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1088,6 +1092,7 @@ async def auth_login(payload: AuthRequest, user_agent: str | None = Header(None)
 # 注销：作废当前这个令牌（而不是删账号）。
 # 【注意】这里多了一个依赖 `Depends(auth.current_user)`：它会先校验令牌是否有效，
 # 无效就直接返回 401，函数体根本不会执行 —— 所以注销只能针对「已登录的人」。
+# 拿不到合法令牌绝不返回 ok:true（否则前端以为已登出，令牌却还有效）。
 @app.post("/api/auth/logout")
 async def auth_logout(
     user: dict[str, Any] = Depends(auth.current_user),
@@ -1096,7 +1101,8 @@ async def auth_logout(
     s = get_settings()
     with _auth_errors():
         # require_bearer 从请求头里把「Bearer xxx」中的 xxx 抠出来，
-        # 格式不对会抛错（由 _auth_errors 翻译成 400/401）。
+        # 拿不到合法令牌会抛 Unauthorized（由 _auth_errors 翻译成 401）——
+        # 与上面的 current_user 依赖形成双保险，谁也不能单方面放行。
         await asyncio.to_thread(auth.logout, s, auth.require_bearer(authorization))
     # 回显用户名，方便前端提示「xxx 已退出登录」。
     return {"ok": True, "username": user["username"]}
