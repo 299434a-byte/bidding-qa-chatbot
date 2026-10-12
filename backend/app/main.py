@@ -1410,7 +1410,7 @@ def _bm25_doc_count(s: Settings) -> int:
 def kb_samples(limit: int = Query(5, ge=1, le=50)) -> dict[str, Any]:
     s = get_settings()
     try:
-        # .sample(limit) 从向量库里随机/顺序取出若干条原始片段。
+        # .sample(limit) 按存储顺序取前若干条原始片段（scroll，非随机）。
         return {"samples": get_store(s).sample(limit)}
     except VectorStoreError as exc:
         # 与 /api/kb/stats 口径一致：向量库连不上/被锁/维度不符 → 503，
