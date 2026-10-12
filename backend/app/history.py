@@ -485,21 +485,64 @@ def title_from_question(question: str, limit: int) -> str:
     return text
 
 
-# _normalize_range：把用户给的日期范围「补全成能比较的完整时间」。
-# 只给日期（长度 <= 10，如 "2026-09-29"）时，补上当天的 00:00:00 到 23:59:59，
-# 保证「包含整天」，不会因为少了时分秒而漏掉当天的记录。
+# _to_utc_bound：把用户给的「本地时刻文本」换算成 UTC 的 "YYYY-MM-DD HH:MM:SS"。
+# 用户给的是本地日期/时刻（东八区），比较轴必须与库里的 UTC 对齐（见 timeutil.py）：
+# 带偏移的文本按自带偏移解析；naive 文本按 LEGACY_TZ（东八区）解释再转 UTC ——
+# 偏移量取自 timeutil 常量，不硬编码 8。
+def _to_utc_bound(text: str) -> str:
+    moment = timeutil.parse_ts(text)
+    if moment is None:
+        # 解析不了就按原样比较（老行为兜底），不让一个坏参数把整次搜索打死。
+        return text
+    # 归一成秒级 UTC 文本，与 _created_at_utc_sql 产出的值同形可比。
+    return moment.strftime("%Y-%m-%d %H:%M:%S")
+
+
+# _legacy_to_utc_modifier：naive 文本（东八区）→ UTC 的 SQLite 时间修正串。
+# 正号取自 timeutil.LEGACY_TZ 再取负：本地转 UTC 是「减去」本地偏移。
+def _legacy_to_utc_modifier() -> str:
+    minutes = -timeutil.LEGACY_TZ.utcoffset(None).total_seconds() / 60
+    return f"{minutes:g} minutes"
+
+
+# _created_at_utc_sql：把 created_at 归一成 UTC 秒级文本的 SQL 表达式（比较前的值侧归一）。
+# 库里两种格式混存（不迁移老数据，比较时就地归一）：
+#   · 新格式带 +00:00 偏移（"2026-10-12T08:00:00+00:00"）—— datetime() 按自带偏移换算成 UTC；
+#   · 老格式 naive（"2026-10-12 08:00:00"）—— 按东八区解释，减去 LEGACY_TZ 偏移得 UTC；
+#   · 文本坏掉时 datetime() 返回 NULL —— COALESCE 回落到 replace(x,'T',' ') 原样比较（老行为）。
+# 为什么必须 replace(x,'T',' ')：'T'(84) > ' '(32)，T 格式与空格格式字符串比较不等价，
+# 不归一则 "2026-10-12T…" <= "2026-10-12 23:59:59" 恒假，结束日当天的记录全漏。
+# 为什么 naive 不能当 UTC 文本比：老记录是按本地时间写入的，晚间记录会被 UTC 上界误杀。
+def _created_at_utc_sql(column: str = "m.created_at") -> str:
+    shift = _legacy_to_utc_modifier()
+    return (
+        "COALESCE("
+        f"CASE WHEN {column} GLOB '*[+-][0-9][0-9]:[0-9][0-9]' OR {column} GLOB '*Z' "
+        f"THEN datetime(replace({column},'T',' ')) "
+        f"ELSE datetime(replace({column},'T',' '), '{shift}') END, "
+        f"replace({column},'T',' '))"
+    )
+
+
+# _normalize_range：把用户给的日期范围「补全成能比较的完整时间」，并统一到 UTC。
+# 只给日期（长度 <= 10，如 "2026-09-29"）时，补上本地当天的 00:00:00 到 23:59:59，
+# 保证「包含整天」，不会因为少了时分秒而漏掉当天的记录；
+# 随后把本地边界换算成 UTC —— 值侧由 _created_at_utc_sql 归一到同一根轴再比。
 def _normalize_range(date_from: str | None, date_to: str | None) -> tuple[str | None, str | None]:
-    """时间范围归一化：只给日期时补上当天 00:00:00 / 23:59:59，保证包含整天。"""
+    """时间范围归一化：补全当天 00:00:00 / 23:59:59（本地），再把边界换算成 UTC。"""
     start = (date_from or "").strip()
     end = (date_to or "").strip()
-    # 起始：只有日期就补最早时刻。
+    # 起始：只有日期就补本地最早时刻。
     if start and len(start) <= 10:
         start = f"{start} 00:00:00"
-    # 结束：只有日期就补当天最晚时刻。
+    # 结束：只有日期就补本地最晚时刻（仍是 "YYYY-MM-DD 23:59:59"，含当天整日）。
     if end and len(end) <= 10:
         end = f"{end} 23:59:59"
-    # 空串统一转成 None（表示「不限」）。
-    return (start or None, end or None)
+    # 本地时刻 → UTC；空串统一转成 None（表示「不限」）。
+    return (
+        _to_utc_bound(start) if start else None,
+        _to_utc_bound(end) if end else None,
+    )
 
 
 # _escape：HTML 转义，防止原文里的 < > & 被当成标签。
@@ -1066,11 +1109,14 @@ def search_messages(
     # 条件与参数从「只能看自己的」开始。
     where = ["c.user_id = ?"]
     params: list[Any] = [user_id]
+    # 时间比较前，值侧先归一到 UTC（新 T 格式 / 老 naive 格式混存，见 _created_at_utc_sql），
+    # 与 _normalize_range 算出的 UTC 边界同轴。
+    created_utc = _created_at_utc_sql("m.created_at")
     if start:
-        where.append("m.created_at >= ?")
+        where.append(f"{created_utc} >= ?")
         params.append(start)
     if end:
-        where.append("m.created_at <= ?")
+        where.append(f"{created_utc} <= ?")
         params.append(end)
     if mode:
         where.append("c.mode = ?")
@@ -1148,11 +1194,13 @@ def _search_like(
     # 条件与参数（与 search_messages 类似，但关键词走 LIKE）。
     where = ["c.user_id = ?"]
     params: list[Any] = [user_id]
+    # 时间比较与主路径同一套归一化（start/end 已是 UTC 边界，值侧同样归一到 UTC）。
+    created_utc = _created_at_utc_sql("m.created_at")
     if start:
-        where.append("m.created_at >= ?")
+        where.append(f"{created_utc} >= ?")
         params.append(start)
     if end:
-        where.append("m.created_at <= ?")
+        where.append(f"{created_utc} <= ?")
         params.append(end)
     if mode:
         where.append("c.mode = ?")
