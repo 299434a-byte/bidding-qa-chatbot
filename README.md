@@ -171,9 +171,21 @@ cd backend
 ```powershell
 # 方式 A：打开 /admin 页面，点「重建知识库」（推荐，能看到实时进度）
 # 方式 B：命令行触发，然后轮询进度
-curl -X POST http://127.0.0.1:8000/api/ingest
+# 全量重建（必须显式 recreate=true，见下方互斥规则）
+curl -X POST http://127.0.0.1:8000/api/ingest -H "Content-Type: application/json" -d "{\"mode\":\"full\",\"recreate\":true}"
+# 增量更新（recreate 必须为 false，即默认值）
+curl -X POST http://127.0.0.1:8000/api/ingest -H "Content-Type: application/json" -d "{\"mode\":\"incremental\"}"
 curl http://127.0.0.1:8000/api/ingest/status
 ```
+
+**`mode` 与 `recreate` 的互斥规则**（不满足的组合返回 400）：
+
+| mode | recreate | 结果 | 原因 |
+| --- | --- | --- | --- |
+| `full` | `true` | ✅ 全量重建 | 清空集合后整库重灌，源表已删数据不会残留 |
+| `full` | `false` | ❌ 400 | 全量管道只灌不删（差集是增量专属），已删记录会变僵尸点永久留在库中 |
+| `incremental` | `false`（默认） | ✅ 增量更新 | 算差集，新增/更新/删除都同步 |
+| `incremental` | `true` | ❌ 400 | 先清空再增量自相矛盾，会把该保留的旧数据清掉 |
 
 ### 6. 数据源可切换（默认 MySQL，可切 PostgreSQL 副本）
 

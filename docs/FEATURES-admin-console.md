@@ -51,7 +51,7 @@
 
 **权限**：**未登录时重建 / 增量更新按钮完全不显示**，只保留「登录后可执行重建 / 增量更新等运维操作。」+「去登录」提示。判定来自页面传入的 `loggedIn={Boolean(user)}`，`user` 由启动时 `api.me()` 拉取。重建为高危动作，点击后先弹二次确认（「重建会清空现有知识库并重新灌入全部数据……」）。
 
-> 后端约束（`main.py`）：`/api/ingest` 要求登录（`Depends(auth.current_user)`）；增量模式不允许同时 `recreate=true`（返回 400）；已有任务运行时返回 409。
+> 后端约束（`main.py`）：`/api/ingest` 要求登录（`Depends(auth.current_user)`）；`mode` 与 `recreate` 必须成对——增量不允许 `recreate=true`（400「增量不能重建集合」）、全量不允许 `recreate=false`（400，否则已删数据变僵尸点），请求模型默认 `recreate=false`；已有任务运行时返回 409。互斥表见 README「建知识库」。
 
 ## 4. 评测结果（EvalCard）
 

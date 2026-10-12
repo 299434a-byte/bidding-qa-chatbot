@@ -304,9 +304,12 @@ class ChatRequest(BaseModel):
 
 # 【重建知识库接口的请求体】对应 POST /api/ingest。
 class IngestRequest(BaseModel):
-    # 是否「先清空再重建」。默认 True 是推荐做法：
-    # 避免旧数据残留导致「同一条数据在库里出现两份」，保证结果一致。
-    recreate: bool = Field(True, description="是否清空后重建（推荐 True，保证数据一致）")
+    # 是否「先清空再重建」。默认改 False（曾默认 True，是个配置陷阱）：
+    # 默认 True 意味着「只传 mode="incremental"」会立刻撞上
+    # 「增量不能重建集合」的 400 —— 默认值与增量模式天然互斥。
+    # 现在默认 False，让唯一的合法组合（增量 + 不重建）开箱即用；
+    # 全量必须显式传 recreate=true（否则 400，见 start_ingest 的校验）。
+    recreate: bool = Field(False, description="是否清空后重建；仅全量模式允许为 true")
     # 【新增】建库模式："full"（默认，全量重建，行为与改动前一致）/ "incremental"（增量更新）。
     # 【为什么默认 full（关键）】老前端不传这个字段时，行为与之前完全一样，保证向后兼容。
     # 【为什么用 Literal 限定取值】非法值（如拼错的 "incr"）会被 FastAPI 直接拒成 422，
@@ -2022,13 +2025,28 @@ async def agent_chat(
 #   必须登录后才能触发，避免被匿名请求随意触发而打断线上服务。
 @app.post("/api/ingest")
 def start_ingest(payload: IngestRequest, user: dict[str, Any] = Depends(auth.current_user)) -> dict[str, Any]:
-    # 【参数校验】增量模式不能同时要求「重建集合」：增量的前提是保留旧向量库数据，
-    #   先清空再增量在语义上自相矛盾（recreate=True 会把旧数据清掉，增量就失去意义）。
-    #   直接 400 拒绝，避免调用方误传导致数据被清空。
+    # 【参数校验：mode 与 recreate 必须成对】两种「自相矛盾」的组合都直接 400，
+    # 规则也写进了 README「建知识库」与 docs/FEATURES-admin-console.md：
+    #
+    # ① 增量 + 重建（mode=incremental, recreate=true）：
+    #    增量的前提是保留旧向量库数据，先清空再增量在语义上自相矛盾
+    #    （recreate 会把旧数据清掉，增量就失去意义）→ 拒绝，避免误传清空数据。
     if payload.mode == "incremental" and payload.recreate:
         raise HTTPException(
             status_code=400,
-            detail="增量模式（mode=incremental）不能同时要求 recreate=true",
+            detail="增量不能重建集合：mode=incremental 时请传 recreate=false",
+        )
+    # ② 全量 + 不重建（mode=full, recreate=false）：
+    #    全量模式的管道只「往里灌」，既不算差集也不删除（差集是增量专属），
+    #    recreate=false 时源表已删的记录会变成僵尸点永久留在向量库里继续被检索。
+    #    要么走增量（自带差集删除），要么全量重建集合 —— 这里选拒绝并说明原因。
+    if payload.mode == "full" and not payload.recreate:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "全量必须重建集合（recreate=true），否则已删除的数据不会清理、"
+                "会以僵尸点残留并继续被检索；若只想同步变化，请改用 mode=incremental"
+            ),
         )
     with _state_lock:
         # 已有任务在跑就直接拒绝（409 = 冲突），避免并发建库互相破坏数据。
