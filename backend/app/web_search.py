@@ -208,21 +208,31 @@ async def search_web_bidding(query: str, config: RunnableConfig) -> str:
         fallback = get_settings()
         state = {"settings": fallback, "max_results": fallback.tavily_max_results}
 
-    # 取出配置对象。
-    s: Settings = state["settings"]
-    # 配置检查：若没配 Tavily 的 Key，就不该联网。
-    # 记下错误、清空结果，并返回「如实告知未配置」的提示（绝不编造）。
-    if not s.web_search_configured:
-        state["error"] = "未配置 Tavily API Key（TAVILY_API_KEY）"
-        state["results"] = []
-        return "联网搜索不可用：后端未配置 TAVILY_API_KEY。请如实告知用户，不要编造搜索结果。"
-
+    # 【工具永不抛异常】与 pg.py / graph.py 同一承诺：搜索失败不拖垮问答。
+    # 下面任何异常——配置缺失、WebSearchError 以外的意外错误（SDK 返回结构异常、
+    # 结果整理崩了……）——一律转成「可读提示」返回给模型，由模型如实告知用户。
     try:
+        # 取出配置对象（state 缺 settings 时转成可读失败，不让 KeyError 冒出工具）。
+        s: Settings = state.get("settings")  # type: ignore[assignment]
+        if s is None:
+            raise WebSearchError("工具未注入配置（state 缺少 settings），无法联网搜索")
+        # 配置检查：若没配 Tavily 的 Key，就不该联网。
+        # 记下错误、清空结果，并返回「如实告知未配置」的提示（绝不编造）。
+        if not s.web_search_configured:
+            state["error"] = "未配置 Tavily API Key（TAVILY_API_KEY）"
+            state["results"] = []
+            return "联网搜索不可用：后端未配置 TAVILY_API_KEY。请如实告知用户，不要编造搜索结果。"
+
         # 用 asyncio.to_thread 把同步的 _search 挪到后台线程执行，await 拿结果。
         # max_results 优先用状态里的；缺失就用 DEFAULT_MAX_RESULTS 兜底。
         results = await asyncio.to_thread(
             _search, query, s, state.get("max_results") or DEFAULT_MAX_RESULTS
         )
+        # 成功：回填状态（供事件层/前端展示），并渲染成参考资料返回。
+        state["query"] = query
+        state["results"] = results
+        state["error"] = None
+        return render_results(query, results)
     # 搜索失败：不让整轮问答失败——记下错误、清空结果，返回友好提示。
     # 这样模型仍能基于已有信息（比如本地检索结果）继续作答。
     except WebSearchError as exc:
@@ -231,9 +241,9 @@ async def search_web_bidding(query: str, config: RunnableConfig) -> str:
         state["results"] = []
         state["error"] = str(exc)
         return f"{exc}\n\n请如实告知用户联网搜索未成功，不要编造任何搜索结果。"
-
-    # 成功：回填状态（供事件层/前端展示），并渲染成参考资料返回。
-    state["query"] = query
-    state["results"] = results
-    state["error"] = None
-    return render_results(query, results)
+    except Exception as exc:  # noqa: BLE001 - 工具承诺绝不把异常抛回给 Agent
+        # 兜住「WebSearchError 之外的一切意外」：同样转成可读提示，问答继续。
+        state["query"] = query
+        state["results"] = []
+        state["error"] = f"联网搜索失败：{exc}"
+        return f"联网搜索失败：{exc}\n\n请如实告知用户联网搜索未成功，不要编造任何搜索结果。"
