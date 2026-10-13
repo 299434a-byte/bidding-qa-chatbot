@@ -4,10 +4,6 @@ import { useEffect, useState } from "react";
 import Icon from "@/components/ui/icons";
 import { cycleTheme, getThemePref, setThemePref, type ThemePref } from "@/lib/theme";
 
-/**
- * 主题切换按钮：浅色 / 暗色 / 跟随系统 三态循环。
- * 偏好写入 localStorage；跟随系统时不写 <html data-theme>，交给 CSS 媒体查询决定。
- */
 export default function ThemeToggle() {
   const [pref, setPref] = useState<ThemePref>("auto");
 

@@ -9,10 +9,9 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    // suppressHydrationWarning：主题脚本会在 React 挂载前改写 <html data-theme>，属预期行为
     <html lang="zh-CN" suppressHydrationWarning>
       <head>
-        {/* 在样式与内容渲染前落主题，避免暗色偏好用户看到一闪而过的白屏 */}
+        {}
         <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
       </head>
       <body>{children}</body>

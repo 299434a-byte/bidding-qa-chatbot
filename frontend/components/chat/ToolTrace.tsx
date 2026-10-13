@@ -2,26 +2,9 @@
 
 import type { GraphQueryInfo, SqlQueryInfo, WebSearchInfo } from "@/lib/api";
 
-/**
- * 工具调用痕迹：把 Agent 调用 PostgreSQL / Neo4j / 联网搜索 三类工具的结果，
- * 以「可折叠」的形式展示在回答下方。
- *
- * 【为什么单独抽成组件】
- *   这三块结构相似、加起来两百多行，抽出来后 page.tsx 只留一句 <ToolTrace/>。
- *
- * 【为什么把 SQL 与 Cypher 合并成一个 QueryBlock】
- *   两者的折叠结构完全一样（标题 + 代码块 + 结果表格 + 提示），只是字段名不同
- *   （PostgreSQL 是 sql，Neo4j 是 cypher）。合并后只需维护一份渲染逻辑。
- *
- * 【为什么不再写死浅色】
- *   原先内联样式里写死了 #fff / #e2e8f0 等浅色，在深色主题下很刺眼；
- *   现在统一改用 globals.css 里新增的 .trace-* 类，跟随主题变量。
- */
 
-/** 结果表格里的一行（列名 -> 值） */
 type Row = Record<string, unknown>;
 
-/** 单个查询块：标题 + 代码（SQL/Cypher）+ 结果表格 */
 function QueryBlock({
   index,
   code,

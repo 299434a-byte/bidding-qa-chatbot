@@ -3,13 +3,6 @@
 import Icon, { type IconName } from "@/components/ui/icons";
 import type { Health, KbStats, MetricsSummary, SchemaResponse } from "@/lib/api";
 
-/**
- * 系统状态卡片区：按「模型 / 数据 / 工具」三组展示。
- *
- * 每张卡统一为「图标 + 名称 + 值 + 一句话说明 + 语义色状态点」：
- *   灰点 = 未启用，绿点 = 正常，红点 = 异常。
- * 缺失的值一律显示 `—`，避免出现「0 块 —」这类残缺拼接。
- */
 
 type Tone = "ok" | "err" | "off";
 
@@ -25,20 +18,16 @@ type Props = {
   health: Health | null;
   kb: KbStats | null;
   schema: SchemaResponse | null;
-  /** 问答指标（/api/metrics）；拉取失败或还没拉时为 null，重排成功率卡显示「—」 */
   metrics?: MetricsSummary | null;
-  /** 指标接口返回 401（未登录）：重排成功率卡显示「需登录后查看」 */
   metricsLocked?: boolean;
 };
 
-/** 空值统一成 `—` */
 function dash(value: unknown): string {
   if (value === null || value === undefined) return "—";
   const text = String(value).trim();
   return text === "" ? "—" : text;
 }
 
-/** 千分位 + 单位 */
 function fmtCount(value: number | undefined, unit: string): string {
   if (value === undefined || value === null) return "—";
   return `${value.toLocaleString("zh-CN")} ${unit}`;

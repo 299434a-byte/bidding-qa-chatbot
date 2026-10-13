@@ -2,43 +2,23 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { api, type Conversation, type HistoryHit, type User } from "@/lib/api";
-// 【展示本地化】时间列不再直接截断字符串：库里的 UTC 时间戳要解析后换算成东八区展示
-// （历史 naive 文本按东八区解释），实现见 lib/timefmt.ts。
 import { shortTime } from "@/lib/timefmt";
 
-/**
- * 对话历史面板（主对话页左栏专用）：新建对话 + 关键词检索 + 会话列表 + 重命名 / 删除。
- *
- * 【为什么变简单了】
- *   原先把「日期范围 + 模式筛选 + 检索/清空按钮」也放在这里，左栏改窄（260px）后太挤；
- *   按改造方案，这些偏「管理/分析」的筛选搬到了后台页 /admin（见 components/admin/HistorySearch.tsx），
- *   左栏只留最常用的「新建、搜索、列表」。
- *
- * 【检索怎么触发】
- *   只保留关键词输入框，按回车即检索；把输入框清空会自动回到普通会话列表。
- */
 
 type Props = {
-  /** 后端是否开启对话历史（/api/health 的 history_configured） */
   enabled: boolean;
-  /** 当前登录用户（未登录时为 null） */
   user: User | null;
-  /** 打开某个会话并定位到命中消息（messageId 可省略） */
   onOpenConversation: (id: string, messageId?: string) => void;
-  /** 新建对话 */
   onNewConversation: () => void;
-  /** 外部触发刷新（如新一轮对话落库后自增） */
   refreshKey: number;
 };
 
-/** 模式展示名（与输入区的三选一保持一致） */
 const MODE_LABELS: Record<string, string> = {
   react: "ReAct",
   plan: "Plan-and-Solve",
   deep: "深度思考",
 };
 
-/** 【展示本地化】shortTime 已上提到 lib/timefmt.ts：解析 UTC/老 naive 文本后按东八区格式化为「YYYY-MM-DD HH:mm」。 */
 
 
 export default function HistoryPanel({ enabled, user, onOpenConversation, onNewConversation, refreshKey }: Props) {
@@ -47,17 +27,14 @@ export default function HistoryPanel({ enabled, user, onOpenConversation, onNewC
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // 关键词检索
   const [q, setQ] = useState("");
   const [hits, setHits] = useState<HistoryHit[] | null>(null);
   const [searchTotal, setSearchTotal] = useState(0);
   const [searching, setSearching] = useState(false);
 
-  // 重命名中的会话 id 与草稿
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameText, setRenameText] = useState("");
 
-  /** 拉取会话列表 */
   const load = useCallback(async () => {
     if (!enabled || !user) {
       setItems([]);

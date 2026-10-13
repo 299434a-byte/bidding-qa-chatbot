@@ -1,10 +1,3 @@
-/** 轻量 Markdown → HTML（先转义再渲染，避免 XSS）。
-
-新增能力（相比初版）：
-  - 管道表格 → 包进 .md-table 容器，外层横向滚动；
-  - 行内引用 [1] → 可点胶囊 <button class="cite" data-cite="n">（n 超过来源总数时原样保留）；
-  - 代码块 → 包进 .code-block，自带「复制」按钮（事件由消息容器委托处理，本文件不支持交互）。
- */
 
 export function escapeHtml(input: string): string {
   return input
@@ -15,17 +8,14 @@ export function escapeHtml(input: string): string {
 }
 
 export type MdOptions = {
-  /** 行内引用 [1]~[n] 中允许渲染成胶囊的最大编号（= 本轮来源条数）；0 表示全部保留为纯文本 */
   citeMax?: number;
 };
 
-/** 引用编号的哨兵占位（避开转义，最后统一替换成胶囊 HTML）。 */
 const CITE = "\u0001";
 
 function inline(text: string, citeMax: number): string {
   let out = escapeHtml(text);
 
-  // 行内代码（先放标记，避免内部的下划线/星号被误伤）
   out = out.replace(/`([^`]+)`/g, '<code class="inline">$1</code>');
   // 加粗 / 斜体 / 链接
   out = out.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");

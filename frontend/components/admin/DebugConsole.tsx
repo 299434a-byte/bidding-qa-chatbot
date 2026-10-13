@@ -5,12 +5,6 @@ import Icon from "@/components/ui/icons";
 import type { IngestStatus } from "@/lib/api";
 import type { ToastKind } from "@/components/chat/Toast";
 
-/**
- * 调试控制台：重建 / 增量更新 + 建库进度 + 实时日志 + 结果回显。
- *
- * 重建是整库重灌的高危动作，点击后先弹二次确认；未登录则完全不显示写操作按钮，
- * 只保留「去登录」提示。建库结束后用 toast 汇报成功 / 失败。
- */
 
 type IngestResult = {
   documents?: number;
@@ -28,12 +22,10 @@ type IngestResult = {
 type Props = {
   ingest: IngestStatus | null;
   loading: boolean;
-  /** 是否已登录：未登录时隐藏「重建知识库」等写操作，避免匿名触发高危运维动作 */
   loggedIn: boolean;
   onRebuild: () => void;
   onIncremental: () => void;
   onRefresh: () => void;
-  /** 未登录时点「去登录」，由页面打开登录弹窗 */
   onLogin: () => void;
   onToast: (text: string, kind?: ToastKind) => void;
 };
@@ -56,10 +48,8 @@ export default function DebugConsole({
   const result = (ingest?.result ?? null) as IngestResult | null;
   const [confirmOpen, setConfirmOpen] = useState(false);
   const logRef = useRef<HTMLDivElement>(null);
-  /** 上一次的 running 值：只在「进行中 → 结束」那一刻弹提示，避免首屏误报 */
   const wasRunning = useRef(running);
 
-  // 建库结束：根据有无错误弹成功 / 失败提示
   useEffect(() => {
     if (wasRunning.current && !running) {
       if (ingest?.error) onToast("操作失败，请查看下方日志", "error");
@@ -68,7 +58,6 @@ export default function DebugConsole({
     wasRunning.current = running;
   }, [running, ingest?.error, result?.added, onToast]);
 
-  // 日志实时滚动到底部
   useEffect(() => {
     const el = logRef.current;
     if (el) el.scrollTop = el.scrollHeight;
@@ -109,7 +98,7 @@ export default function DebugConsole({
         </div>
       )}
 
-      {/* 进行中：阶段文案 + 进度条 */}
+      {}
       {running && (
         <div style={{ marginTop: "var(--sp-12)" }}>
           <div className="row">
@@ -122,7 +111,7 @@ export default function DebugConsole({
         </div>
       )}
 
-      {/* 结果回显 */}
+      {}
       <div className="card" style={{ marginTop: "var(--sp-12)" }}>
         {ingest?.error && <div className="notice notice-danger">{ingest.error}</div>}
         {result && !running && (

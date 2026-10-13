@@ -23,8 +23,6 @@ import {
   type PlanStepRun,
   type User,
 } from "@/lib/api";
-// 【展示本地化】历史消息的 created_at 用 parseTs 解析（UTC ISO / 老 naive 文本按东八区），
-// 再交给展示层格式化；解析失败按无时间处理。
 import { parseTs } from "@/lib/timefmt";
 
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -37,55 +35,34 @@ export default function Home() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
-  /** busy 的同步镜像：state 更新是异步的，只有 ref 能在同一帧内挡住第二次提交 */
   const busyRef = useRef(false);
 
-  /** 待上传的图片与它的预览（data URL，发送后随消息一起展示） */
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
-  /** 图片解析中（用于按钮/提示文案） */
   const [analyzing, setAnalyzing] = useState(false);
-  /** 「联网搜索」开关：null 表示还没手动改过，用后端的默认值 */
   const [webSearch, setWebSearch] = useState<boolean | null>(null);
-  /** 推理模式：默认 ReAct（恢复历史会话时会采用该会话记录的模式） */
   const [mode, setMode] = useState<ChatMode>("react");
 
-  /** 当前登录用户（null 为未登录） */
   const [user, setUser] = useState<User | null>(null);
-  /** 登录 / 注册弹窗是否打开 */
   const [authOpen, setAuthOpen] = useState(false);
-  /** 当前落库的会话 id（未登录 / 未落库时为 null） */
   const [conversationId, setConversationId] = useState<string | null>(null);
-  /** 历史面板刷新信号（对话落库后自增） */
   const [historyRefreshKey, setHistoryRefreshKey] = useState(0);
-  /** 从检索结果跳转过来时要高亮的消息 id（短暂高亮后清除） */
   const [highlightId, setHighlightId] = useState<string | null>(null);
-  /** 移动端左栏抽屉是否展开（桌面忽略） */
   const [railOpen, setRailOpen] = useState(false);
 
-  /** 轻量 toast（复制成功 / 操作失败等即时反馈） */
   const [toasts, pushToast] = useToasts();
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  /** 当前流式请求的控制器：新建对话 / 切会话 / 组件卸载时中断它 */
   const abortRef = useRef<AbortController | null>(null);
 
-  /** 流式增量缓冲：delta 先攒在这里，由定时器冲刷——每 ≥50ms 合并一次，不逐 token 重渲染/重解析 */
   const deltaBufRef = useRef<{ content: string; revision: string; byCitation: boolean } | null>(null);
   const flushTimerRef = useRef<number | null>(null);
 
-  /** 是否贴在底部：只有贴底时新内容才自动跟随滚动；上滑后不抢滚动 */
   const atBottomRef = useRef(true);
-  /** 「回到最新」「回到顶部」浮动按钮的可见性（state 驱动渲染） */
   const [showJumpLatest, setShowJumpLatest] = useState(false);
   const [showJumpTop, setShowJumpTop] = useState(false);
 
-  /**
-   * 证据面板状态：绑定的助手消息 id + 尺寸 + 定位请求。
-   * nonce 每次定位自增——即使定位同一条，也要靠 nonce 变化重新触发滚动与高亮。
-   * null（且当前回答有来源）= 默认折叠条。
-   */
   const [evidence, setEvidence] = useState<{
     msgId: string;
     size: EvidenceSize;
@@ -93,7 +70,6 @@ export default function Home() {
     nonce: number;
   } | null>(null);
 
-  // ------------------------------ 数据加载 ------------------------------ //
   const refresh = useCallback(async () => {
     try {
       const [h, k] = await Promise.all([api.health(), api.kbStats()]);
@@ -109,15 +85,12 @@ export default function Home() {
     void refresh();
   }, [refresh]);
 
-  // 新内容到达：只有贴底时才跟随（上滑查看历史时不抢滚动）。直接改 scrollTop——
-  // 流式每 ≥50ms 合并一次，瞬时定位比 smooth 更跟手，也不会在高频更新下排队抖动。
   useEffect(() => {
     if (!atBottomRef.current) return;
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages]);
 
-  // 启动时若本地有令牌，拉一次当前用户；令牌失效（401）则静默清除，保持未登录
   useEffect(() => {
     if (!getToken()) return;
     let alive = true;
@@ -134,10 +107,8 @@ export default function Home() {
     };
   }, []);
 
-  // 组件卸载时中断仍在进行的请求，避免更新已卸载组件、也避免连接泄漏
   useEffect(() => () => abortRef.current?.abort(), []);
 
-  /** 丢弃尚未冲刷的 delta 缓冲与定时器（切会话 / 新建对话时，旧流的尾巴不能写进新会话） */
   const clearDeltaQueue = useCallback(() => {
     if (flushTimerRef.current != null) {
       window.clearTimeout(flushTimerRef.current);
@@ -146,7 +117,6 @@ export default function Home() {
     deltaBufRef.current = null;
   }, []);
 
-  // 从检索结果定位到某条消息：滚动到可视区并短暂高亮
   useEffect(() => {
     if (!highlightId) return;
     const el = document.getElementById(`msg-${highlightId}`);

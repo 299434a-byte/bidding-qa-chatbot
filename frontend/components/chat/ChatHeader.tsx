@@ -5,12 +5,7 @@ import Icon from "@/components/ui/icons";
 import ThemeToggle from "@/components/ThemeToggle";
 import type { ChatMode } from "@/lib/api";
 
-/**
- * 聊天区顶部标题栏：移动端菜单按钮 + 标题 + 当前推理模式标签，
- * 右侧主题切换与后台控制台入口。sticky + 半透明，内容不会透过顶栏。
- */
 
-/** 推理模式 -> 展示文案 */
 const MODE_LABEL: Record<ChatMode, string> = {
   react: "ReAct",
   plan: "Plan-and-Solve",
@@ -19,7 +14,6 @@ const MODE_LABEL: Record<ChatMode, string> = {
 
 type Props = {
   mode: ChatMode;
-  /** 移动端打开左栏抽屉（桌面不显示该按钮） */
   onOpenRail?: () => void;
 };
 

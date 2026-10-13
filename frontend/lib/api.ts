@@ -1,11 +1,4 @@
-/**
- * 后端接口封装。
- * SSE 用 fetch + ReadableStream 手动解析（EventSource 只支持 GET，
- * 而 /api/chat 需要 POST 传问题正文）。
- */
 
-// 回落规则：只有「完全没设置过」才用本地开发默认值；显式留空（=""）表示同源部署，
-// 请求走相对路径 /api/*，由 Nginx 反代转给后端（|| 会把空串也当成假值，做不到这一点）。
 const raw = process.env.NEXT_PUBLIC_API_BASE;
 export const API_BASE = (raw === undefined ? "http://127.0.0.1:8000" : raw).replace(/\/+$/, "");
 
@@ -56,79 +49,56 @@ export type Health = {
   status: string;
   llm_configured: boolean;
   llm_model: string | null;
-  /** 界面展示用的大模型名（优先于 llm_model，由后端 LLM_MODEL_DISPLAY 决定） */
   llm_model_display?: string | null;
   rerank_configured?: boolean;
   rerank_model?: string | null;
-  /** Agent 是否可用（依赖大模型配置） */
   agent_configured?: boolean;
   agent_model?: string | null;
   mysql_configured: boolean;
-  /** 建库管道当前实际使用的数据源：mysql（默认）/ postgres（本机副本） */
   kb_source?: "mysql" | "postgres";
-  /** PostgreSQL 查询工具是否可用（连接信息齐备才算配置好） */
   pg_configured?: boolean;
   pg_model?: string | null;
-  /** Neo4j 知识图谱查询工具是否可用（连接信息齐备才算配置好） */
   graph_configured?: boolean;
   graph_model?: string | null;
-  /** 联网搜索工具是否可用（取决于后端是否配置 TAVILY_API_KEY） */
   web_search_configured?: boolean;
   web_search_provider?: string | null;
-  /** 「联网搜索」开关的后端默认值 */
   web_search_default?: boolean;
-  /** 图片解析是否可用（取决于后端是否配置 ZHIPUAI_API_KEY） */
   vision_configured?: boolean;
-  /** 对话历史是否开启（后端 HISTORY_ENABLED） */
   history_enabled?: boolean;
-  /** 对话历史是否可用（历史与账号体系都开启才算配置好） */
   history_configured?: boolean;
-  /** 账号体系是否开启（后端 AUTH_ENABLED） */
   auth_enabled?: boolean;
-  /** 后端支持的推理模式 */
   modes?: ChatMode[];
   index: KbStats;
   ingesting: boolean;
 };
 
-/** 后台问答可观测性指标（GET /api/metrics 的返回体，含重排成功/失败计数） */
 export type MetricsSummary = {
-  /** 累计问答次数 */
   total: number;
   avg_elapsed_ms: number;
   max_elapsed_ms: number;
   avg_first_token_ms: number;
   mode_distribution: Record<string, number>;
   cache_hit_rate: number;
-  /** 重排应用率：成功次数 / 全部问答（0~1） */
   rerank_applied_rate: number;
-  /** 重排成功的次数 */
   rerank_applied: number;
-  /** 重排失败降级的次数 */
   rerank_failed: number;
-  /** 按需触发判定后主动跳过重排的次数 */
   rerank_skipped: number;
-  /** 重排成功率：成功 /（成功 + 失败），只统计真正尝试过重排的问答（0~1） */
   rerank_success_rate: number;
 };
 
-/** 推理模式：ReAct / Plan-and-Solve / 深度思考 */
 export type ChatMode = "react" | "plan" | "deep";
 
-/** 登录用户 */
 export type User = {
   id: string;
   username: string;
   created_at?: string;
 };
 
-/** 注册 / 登录成功的返回体 */
 export type AuthResponse = {
   token: string;
   user: { id: string; username: string };
 };
 
-/** 会话列表项 */
 export type Conversation = {
   id: string;
   title: string;
@@ -138,15 +108,12 @@ export type Conversation = {
   message_count: number;
 };
 
-/** 助手消息落库的元数据（恢复会话时据此重建工具/来源/规划等卡片） */
 export type HistoryMeta = {
   mode?: string;
   tool_calls?: { name: string; query: string }[];
   tool_results?: { name: string; count: number }[];
   sources?: Source[];
-  /** 恢复时只有 sql / row_count / error，没有结果明细行 */
   sql?: { sql: string; row_count: number; error?: string | null } | null;
-  /** 恢复时只有 cypher / row_count / error，没有结果明细行 */
   graph?: { cypher: string; row_count: number; error?: string | null } | null;
   web_search?: { query: string; results: WebSearchResult[]; error?: string | null } | null;
   plan?: PlanStep[];
@@ -157,7 +124,6 @@ export type HistoryMeta = {
   error?: string | null;
 };
 
-/** 历史里的单条消息 */
 export type HistoryMessage = {
   id: string;
   conversation_id: string;
@@ -168,7 +134,6 @@ export type HistoryMessage = {
   meta: HistoryMeta | null;
 };
 
-/** 历史搜索结果项（snippet 已含 <em> 高亮且已转义，直接渲染） */
 export type HistoryHit = {
   message_id: string;
   conversation_id: string;
@@ -179,14 +144,12 @@ export type HistoryHit = {
   snippet: string;
 };
 
-/** 规划阶段的一个子任务 */
 export type PlanStep = {
   index: number;
   title: string;
   detail: string;
 };
 
-/** 子任务执行状态 */
 export type PlanStepRun = {
   index: number;
   title: string;
@@ -195,28 +158,18 @@ export type PlanStepRun = {
   error: string | null;
 };
 
-/** 深度模式的自评结果 */
 export type ReflectionInfo = {
   round: number;
   verdict: "ok" | "revise";
   issues: string[];
 };
 
-/**
- * 引用校验发现的一处问题（后端 citation.py 产出）。
- * 注意：后端发的是对象而非字符串，旧前端把它当 string 直接渲染会导致
- * 「Objects are not valid as a React child」崩溃，故显式声明真实结构。
- */
 export type CitationIssue = {
-  /** 问题类型，如 ref_out_of_range / number_no_source */
   type?: string;
-  /** 出问题的原始片段（引用编号或数值等，类型不固定） */
   value?: unknown;
-  /** 给人看的一句话说明 */
   message?: string;
 };
 
-/** SSE 首个事件：告知当前会话的落库情况 */
 export type ConversationEvent = {
   type: "conversation";
   id: string | null;
@@ -225,18 +178,14 @@ export type ConversationEvent = {
   saved: boolean;
 };
 
-/** Agent 发起的一次工具调用 */
 export type ToolCallInfo = {
   name: string;
-  /** 工具入参里的检索词（Agent 可能对用户原话做了改写） */
   query?: string;
   arguments?: Record<string, unknown>;
 };
 
-/** Agent 工具调用的执行结果 */
 export type ToolResultInfo = {
   name: string;
-  /** 命中条数 */
   count: number;
 };
 
@@ -253,7 +202,6 @@ export type Source = {
   matched_by: string[];
   text: string;
   fields: Record<string, unknown>;
-  /** 大模型重排后的名次（1 起）。未重排时为 null */
   rerank_rank?: number | null;
 };
 
@@ -263,57 +211,43 @@ export type RetrievalMeta = {
   bm25_ready: boolean;
   final_count: number;
   llm_configured: boolean;
-  /** 重排是否真的生效（未配置大模型 / 候选不足 / 调用失败时为 false） */
   rerank_applied?: boolean;
   rerank_model?: string | null;
   rerank_candidates?: number;
   rerank_error?: string | null;
-  /** 按需触发判定后是否主动跳过了重排（RERANK_MODE=auto/off，或候选不足） */
   rerank_skipped?: boolean;
-  /** 跳过原因：mode_off / too_few_candidates / auto_order_reliable */
   rerank_skip_reason?: string | null;
 };
 
-/** Agent 调用 PostgreSQL 工具后返回的查询详情（供前端展示 SQL 与结果表格） */
 export type SqlQueryInfo = {
   sql: string;
   columns: string[];
   rowCount: number;
   rows: Record<string, unknown>[];
-  /** 非空表示这次查询失败 */
   error?: string | null;
 };
 
-/** Agent 调用 Neo4j 图谱工具后返回的查询详情（供前端展示 Cypher 与结果） */
 export type GraphQueryInfo = {
   cypher: string;
   rowCount: number;
   rows: Record<string, unknown>[];
-  /** 非空表示这次查询失败 */
   error?: string | null;
 };
 
-/** 联网搜索的单条结果（Tavily） */
 export type WebSearchResult = {
   title: string;
   url: string;
   content: string;
-  /** 相关性评分（0~1，越大越相关），由 Tavily 返回 */
   score: number;
 };
 
-/** Agent 调用联网搜索工具后返回的搜索详情 */
 export type WebSearchInfo = {
-  /** 实际用于搜索的关键词（Agent 可能对用户原话做了改写） */
   query: string;
   results: WebSearchResult[];
-  /** 非空表示这次联网搜索失败 */
   error?: string | null;
 };
 
-/** 图片解析结果（POST /analyze-image） */
 export type ImageAnalysis = {
-  /** 视觉模型识别出的文本内容 */
   text: string;
   model: string | null;
   filename: string | null;
@@ -324,16 +258,11 @@ export type ImageAnalysis = {
 export type ChatEvent =
   | { type: "retrieval"; meta: RetrievalMeta }
   | { type: "sources"; sources: Source[] }
-  /** channel 缺省为 answer（正文）；revision 是改进稿，需单独渲染。
-   *  reason="citation" 表示这份修订稿来自「引用校验」（与深度模式的修订稿区分）。 */
   | { type: "delta"; text: string; channel?: "answer" | "revision"; reason?: "citation" }
   | { type: "done"; mode: string }
   | { type: "error"; message: string }
-  /** SSE 首个事件：会话落库情况（未登录 / 未开启历史时 saved:false, id:null） */
   | ConversationEvent
-  /** 规划阶段产出的子任务列表（仅 plan / deep 模式） */
   | { type: "plan"; steps: PlanStep[]; fallback: boolean }
-  /** 单个子任务的执行状态（仅 plan / deep 模式） */
   | {
       type: "plan_step";
       index: number;
@@ -342,13 +271,9 @@ export type ChatEvent =
       observation: string | null;
       error: string | null;
     }
-  /** 深度模式的自评结果（仅 deep 模式） */
   | { type: "reflection"; round: number; verdict: "ok" | "revise"; issues: string[]; revision_offered: boolean }
-  /** Agent 决定调用工具（仅 /api/agent/chat 会发） */
   | { type: "tool_call"; name: string; query: string; arguments: Record<string, unknown> }
-  /** 工具执行完成（仅 /api/agent/chat 会发） */
   | { type: "tool_result"; name: string; count: number }
-  /** Agent 调用了 PostgreSQL 工具（仅 /api/agent/chat 会发，在 tool_result 之前） */
   | {
       type: "sql_query";
       sql: string;
@@ -357,7 +282,6 @@ export type ChatEvent =
       rows: Record<string, unknown>[];
       error?: string | null;
     }
-  /** Agent 调用了 Neo4j 图谱工具（仅 /api/agent/chat 会发，在 tool_result 之前） */
   | {
       type: "graph_query";
       cypher: string;
@@ -365,17 +289,14 @@ export type ChatEvent =
       rows: Record<string, unknown>[];
       error?: string | null;
     }
-  /** Agent 调用了 Tavily 联网搜索（仅 /api/agent/chat 会发，在 tool_result 之前） */
   | {
       type: "web_search";
       query: string;
       results: WebSearchResult[];
       error?: string | null;
     }
-  /** 引用校验结果：正文生成后体检发现越界引用/无依据数值时发出（ok:false），供前端提示 */
   | { type: "citation_check"; ok: boolean; issues: (string | CitationIssue)[] };
 
-/** 多轮对话中的一轮，由前端持有并回传给后端（后端无状态） */
 export type ChatTurn = {
   role: "user" | "assistant";
   content: string;

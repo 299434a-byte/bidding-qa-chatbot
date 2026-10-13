@@ -4,10 +4,6 @@ import { useEffect, useState } from "react";
 import Icon from "@/components/ui/icons";
 import { mdToHtml } from "@/lib/markdown";
 
-/**
- * 评测结果卡：读取评测脚本产出的报告（report.md）并渲染其中的汇总表。
- * 报告缺失时展示空态，不影响后台其余部分。
- */
 
 type State = { status: "loading" | "ready" | "empty"; html: string };
 

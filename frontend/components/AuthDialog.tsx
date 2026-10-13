@@ -5,13 +5,10 @@ import Icon from "@/components/ui/icons";
 import { api, setToken, type User } from "@/lib/api";
 
 type Props = {
-  /** 关闭弹窗 */
   onClose: () => void;
-  /** 登录 / 注册成功（令牌已写入本地，回调里只需更新登录态） */
   onSuccess: (user: User) => void;
 };
 
-/** 登录 / 注册弹窗：两态切换，错误提示直接展示后端的 detail。 */
 export default function AuthDialog({ onClose, onSuccess }: Props) {
   const [mode, setMode] = useState<"login" | "register">("login");
   const [username, setUsername] = useState("");
@@ -40,7 +37,6 @@ export default function AuthDialog({ onClose, onSuccess }: Props) {
   };
 
   return (
-    // 点击遮罩关闭；点击卡片内部不关闭
     <div className="auth-overlay" onClick={onClose} role="presentation">
       <div className="auth-card" onClick={(e) => e.stopPropagation()}>
         <div className="auth-head">
@@ -50,7 +46,7 @@ export default function AuthDialog({ onClose, onSuccess }: Props) {
           </button>
         </div>
 
-        {/* 登录 / 注册两态切换 */}
+        {}
         <div className="auth-tabs">
           <button
             className={`seg-item ${mode === "login" ? "seg-active" : ""}`}

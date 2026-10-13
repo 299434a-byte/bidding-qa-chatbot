@@ -2,34 +2,19 @@
 
 import { useState } from "react";
 import { api, type HistoryHit, type User } from "@/lib/api";
-// 【展示本地化】时间列不再直接截断字符串：库里的 UTC 时间戳要解析后换算成东八区展示
-// （历史 naive 文本按东八区解释），实现见 lib/timefmt.ts。
 import { shortTime } from "@/lib/timefmt";
 
-/**
- * 历史检索（后台页专用）：关键词 + 日期范围 + 模式 三个维度的完整检索，
- * 以及「检索 / 清空」按钮与命中结果列表。
- *
- * 【为什么放在后台页】
- *   主对话页左栏改窄成 260px 后，只保留最常用的「新建、关键词搜索、列表」；
- *   这套偏「分析/筛查」的日期与模式筛选按改造方案搬到这里，功能不丢失。
- *
- * 【命中结果的点击行为】
- *   点击一条命中会跳到主对话页并定位到那条消息，所以需要用到 router 跳转。
- */
 
 type Props = {
   user: User | null;
 };
 
-/** 模式展示名（与输入区的三选一保持一致） */
 const MODE_LABELS: Record<string, string> = {
   react: "ReAct",
   plan: "Plan-and-Solve",
   deep: "深度思考",
 };
 
-/** 【展示本地化】shortTime 已上提到 lib/timefmt.ts：解析 UTC/老 naive 文本后按东八区格式化为「YYYY-MM-DD HH:mm」。 */
 
 
 export default function HistorySearch({ user }: Props) {

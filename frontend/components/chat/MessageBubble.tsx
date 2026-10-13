@@ -4,7 +4,6 @@ import { memo, useMemo, useRef, useState } from "react";
 import Icon from "@/components/ui/icons";
 import ToolTrace from "@/components/chat/ToolTrace";
 import { mdToHtml } from "@/lib/markdown";
-// 【展示本地化】消息时刻按东八区展示（实现见 lib/timefmt.ts），与历史列表的时间口径一致。
 import { formatHm } from "@/lib/timefmt";
 import type {
   CitationIssue,
@@ -19,19 +18,7 @@ import type {
   WebSearchInfo,
 } from "@/lib/api";
 
-/**
- * 单条消息（Perplexity 式，无气泡）：头像 + 角色名 + 时间 + 正文（最大 800px 居中）。
- *
- * 助手消息的完整结构（自上而下）：
- *   思考状态条（生成中）→ 正文（行内 [1] 引用胶囊）→ 来源条 → 操作条 → 错误块 / 修订稿 / 工具痕迹
- *
- * 行内引用胶囊的事件用「容器委托」处理（事件挂在 .msg-body 上，不逐按钮绑定）：
- *   - 点击 data-cite  → 右侧证据面板定位该来源
- *   - 悬停 data-cite  → 弹出来源摘要卡（表名 + 片段 + 相似度/名次）
- *   - 点击 .code-copy → 复制对应代码块
- */
 
-/** 查询工具名（与后端一致，用于识别工具徽标文案） */
 const PG_TOOL = "query_bidding_postgres";
 const GRAPH_TOOL = "query_bidding_graph";
 const WEB_TOOL = "search_web_bidding";
@@ -42,12 +29,9 @@ const STEP_STATUS: Record<PlanStepRun["status"], { label: string; cls: string }>
   failed: { label: "失败", cls: "badge-danger" },
 };
 
-/** 消息级错误：网络中断（可重试）与服务端错误分开提示 */
 export type MsgError = {
   kind: "network" | "server";
-  /** 人话（如「服务暂时不可用，请稍后重试」） */
   message: string;
-  /** 原始技术信息，折叠在「技术详情」里 */
   detail?: string;
 };
 
@@ -55,9 +39,7 @@ export type Message = {
   id: string;
   role: "user" | "assistant";
   content: string;
-  /** 消息产生时间（展示 HH:mm；历史恢复时来自后端 created_at） */
   ts?: number | null;
-  /** 用户消息附带的图片（data URL） */
   image?: { url: string; name: string };
   analyzing?: boolean;
   imageResult?: { text: string; model: string | null };
@@ -77,9 +59,7 @@ export type Message = {
   adoptedVersion?: "v1" | "v2";
   mode?: string;
   streaming?: boolean;
-  /** 用户手动停止：内容已保留，给「继续生成」入口 */
   aborted?: boolean;
-  /** 结构化的错误信息（区分网络 / 服务端） */
   error?: MsgError | null;
 };
 
@@ -94,7 +74,6 @@ type Props = {
   onToast: (text: string, kind?: "success" | "error" | "info") => void;
 };
 
-/** 取来源标题：优先标题类字段，其次首个文本字段 */
 function pickTitle(source: Source): string {
   const entries = Object.entries(source.fields ?? {});
   const preferred = entries.find(

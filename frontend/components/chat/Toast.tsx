@@ -2,14 +2,6 @@
 
 import { useCallback, useRef, useState } from "react";
 
-/**
- * 轻量 Toast：右下角、3 秒自动消失。
- * 用法：const [toasts, pushToast] = useToasts(); 页面里渲染 <ToastStack toasts={toasts} />。
- *
- * 【为什么不用 context】
- *   全站只有两个页面需要 toast（对话页、后台页），直接用 hook 返回值传递更直白，
- *   也避免为一个小功能引入 provider 层。
- */
 
 export type ToastKind = "success" | "error" | "info";
 

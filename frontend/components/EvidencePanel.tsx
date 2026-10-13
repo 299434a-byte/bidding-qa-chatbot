@@ -4,53 +4,22 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "@/components/ui/icons";
 import type { Source } from "@/lib/api";
 
-/**
- * 右侧证据面板（本项目的「引用核心叙事」，对标 Perplexity 的来源面板）。
- *
- * 三种尺寸（由 data-size 驱动 CSS，见 globals.css 的 .evidence 规则）：
- *   rail —— 折叠条（默认）：只露一条竖排「证据 · N 条来源」，点击展开为半屏
- *   half —— 半屏抽屉：来源列表，每条可看名次对比
- *   full —— 全屏对比：宽度撑满，适合逐条细读
- *
- * 每条来源展示四层名次信息（这是「一眼看出重排有没有用」的关键）：
- *   向量名次 / BM25 名次 —— 两路召回各自把这条排在第几
- *   融合名次 —— 按 RRF 分数降序推出的「重排前」名次（后端重排后会打乱原始顺序，
- *               但 rrf_score 一直保留着，所以前端按分数排序即可还原融合名次）
- *   重排名次 —— 后端重排模型给出的名次（rerank_rank）；与融合名次的差值用
- *               ↑/↓ 徽标表达，例如「融合 #7 → 重排 #1 ↑6」表示重排把它提到了第 1
- *
- * 「不相关」标记：为后续反馈闭环留的口子——目前只在前端置灰该条，
- *   将来接反馈接口时把 (doc_id, 消息 id) 上报即可（见 toggleIrrelevant 内的注释）。
- */
 
 export type EvidenceSize = "rail" | "half" | "full";
 
 type Props = {
-  /** 本轮回答引用的来源列表（来自 SSE 的 sources 事件） */
   sources: Source[];
-  /** 本轮用户的提问原文：用于在命中片段里高亮问题中的词 */
   query: string;
-  /** 面板当前尺寸（受控，状态在 page.tsx） */
   size: EvidenceSize;
-  /** 切换面板尺寸 */
   onSizeChange: (size: EvidenceSize) => void;
-  /** 关闭面板（仅半屏 / 全屏时可见） */
   onClose: () => void;
-  /**
-   * 定位请求：{ index: 第几条来源（0 起）, nonce: 递增序号 }。
-   * nonce 每次定位 +1——即使定位同一条也要重新触发滚动与闪烁动画，所以用 nonce 而不是 index 做 effect 依赖。
-   */
   locate: { index: number; nonce: number } | null;
 };
 
-/** 中文功能词（的 / 有 / 哪些…）：中文没有空格，整句会被粘成一个词，需要按这些字二次切开 */
 const HIGHLIGHT_STOP =
   "的了吗呢么啊吧是在有和与及或对被把从向往到为以于其中上下个些怎何几许多少请问我你他她它们这那哪些什么怎么样是不是有没有查询查找搜索查一下看看相关关于";
 
-/** 从提问里抽出用于高亮的词：按标点/空白切开，保留长度 ≥2 的词，最多 8 个 */
 function extractTerms(query: string): string[] {
-  // 只按标点切时，「市政道路工程的招标公告有哪些」会是一整个词、永远匹配不到片段——
-  // 所以先按标点/空白切开（原逻辑），再按功能词把粘连的实词二次切开，高亮才真正生效
   const pieces = query.split(/[^一-龥A-Za-z0-9]+/);
   const terms = pieces.flatMap((piece) => piece.split(new RegExp(`[${HIGHLIGHT_STOP}]+`)));
   return Array.from(new Set(terms.filter((term) => term.length >= 2))).slice(0, 8);

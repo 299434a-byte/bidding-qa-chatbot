@@ -23,12 +23,7 @@ import {
   type User,
 } from "@/lib/api";
 
-/**
- * 后台管理页：系统状态（模型 / 数据 / 工具）、数据概览、调试控制台、评测结果、
- * 表结构与历史检索。数据由本页统一拉取，子组件只负责展示。
- */
 
-/** 自动刷新间隔（毫秒） */
 const AUTO_REFRESH_MS = 30_000;
 
 function clockText(): string {

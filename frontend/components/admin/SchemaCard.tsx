@@ -3,14 +3,6 @@
 import { useState } from "react";
 import type { SchemaResponse } from "@/lib/api";
 
-/**
- * MySQL 表结构卡片：每张表一个「可展开」的小卡片，点标题展开字段明细（保留原来的折叠交互），
- * 下方再列出库内其他表（核对表名用）。
- *
- * 【为什么单独抽成组件】
- *   原来这块在主对话页左栏，现按改造方案搬到后台页；折叠状态 openTable 只属于本组件，
- *   放在内部即可，不需要父组件知道。
- */
 
 type Props = {
   schema: SchemaResponse | null;

@@ -3,17 +3,12 @@
 import Icon from "@/components/ui/icons";
 import type { KbStats, SchemaResponse } from "@/lib/api";
 
-/**
- * 数据概览：知识库的文档块分布（按来源）与业务数据表的实际行数。
- * 纯展示，数据来自 props（kb / schema）；数字统一千分位 + 单位。
- */
 
 type Props = {
   kb: KbStats | null;
   schema: SchemaResponse | null;
 };
 
-/** 千分位 + 单位；空值显示 `—` */
 function fmt(value: number | undefined, unit: string): string {
   if (value === undefined || value === null) return "—";
   return `${value.toLocaleString("zh-CN")} ${unit}`;
