@@ -488,8 +488,9 @@ export default function Home() {
               ],
             }));
           else if (event.type === "citation_check")
-            // 引用体检结论：issues 非空表示发现越界引用或无依据数值，挂到消息上供 MessageBubble 提示
-            patch((msg) => ({ ...msg, citationIssues: event.issues }));
+            // 引用体检结论：issues 非空表示发现越界引用或无依据数值，挂到消息上供 MessageBubble 提示；
+            // number_checks 是数字逐字命中明细（found=false 的数字在正文里加醒目标记）
+            patch((msg) => ({ ...msg, citationIssues: event.issues, numberChecks: event.number_checks }));
           else if (event.type === "done") {
             // 结束前先把缓冲里的最后一段 delta 冲刷出来，再收尾状态
             flushNow();

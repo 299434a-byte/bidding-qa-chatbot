@@ -8,6 +8,7 @@ import { formatHm } from "@/lib/timefmt";
 import type {
   CitationIssue,
   GraphQueryInfo,
+  NumberCheck,
   PlanStep,
   PlanStepRun,
   ReflectionInfo,
@@ -57,6 +58,8 @@ export type Message = {
   reflections?: ReflectionInfo[];
   revision?: string;
   citationIssues?: (string | CitationIssue)[];
+  /** 数字逐字命中明细（citation_check 事件带来；found=false 的在正文里加醒目标记） */
+  numberChecks?: NumberCheck[];
   revisionByCitation?: boolean;
   adoptedVersion?: "v1" | "v2";
   mode?: string;
@@ -115,14 +118,32 @@ function fmtTime(ts?: number | null): string {
   return formatHm(ts);
 }
 
+/** 在已渲染的 HTML 上给「未在来源中逐字找到」的数字加醒目标记（只处理标签外的文本段）。 */
+function markMissNumbers(html: string, misses: string[]): string {
+  if (!html || misses.length === 0) return html;
+  const parts = html.split(/(<[^>]*>)/g);
+  for (let i = 0; i < parts.length; i++) {
+    if (parts[i].startsWith("<")) continue; // 标签/属性原样保留，不往里塞标记
+    for (const text of misses) {
+      if (!text || !parts[i].includes(text)) continue;
+      parts[i] = parts[i]
+        .split(text)
+        .join(`<span class="num-miss" title="未在来源中逐字找到">${text}</span>`);
+    }
+  }
+  return parts.join("");
+}
+
 function MessageBubble({ msg, highlighted, busy, onFillInput, onAdopt, onOpenEvidence, onRegenerate, onToast }: Props) {
   // Markdown 只在 content / 来源条数变化时重解析（流式增量由 page.tsx 的 50ms 节流控制频率）
   const citeMax = msg.sources?.length ?? 0;
-  const contentHtml = useMemo(
-    () => (msg.content ? mdToHtml(msg.content, { citeMax }) : ""),
+  const contentHtml = useMemo(() => {
+    const base = msg.content ? mdToHtml(msg.content, { citeMax }) : "";
+    // 数字逐字校验：found=false 的原文写法在正文里加虚线下划线 + 悬停提示（无明细时原样返回）
+    const misses = (msg.numberChecks ?? []).filter((c) => !c.found).map((c) => c.text);
+    return markMissNumbers(base, misses);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [msg.content, citeMax],
-  );
+  }, [msg.content, citeMax, msg.numberChecks]);
   const revisionHtml = useMemo(() => (msg.revision ? mdToHtml(msg.revision, { citeMax }) : ""), [msg.revision, citeMax]);
 
   const bodyRef = useRef<HTMLDivElement>(null);

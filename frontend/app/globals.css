@@ -493,6 +493,13 @@ a {
   color: var(--danger-600);
 }
 
+/* 数字逐字校验：未在引用来源中找到的数字——红色虚线下划线 + 悬停提示 */
+.num-miss {
+  text-decoration: underline dotted var(--danger-500);
+  text-underline-offset: 3px;
+  cursor: help;
+}
+
 .notice-info {
   background: var(--info-50);
   border-color: color-mix(in srgb, var(--info-500) 25%, transparent);

@@ -221,4 +221,9 @@ def answer_events(
     if check is not None and not check.get("ok"):
         revised = strip_bad_refs("".join(answer_parts), check.get("bad_refs") or [])
         yield {"type": "delta", "channel": "revision", "text": revised}
-        yield {"type": "citation_check", "ok": False, "issues": check.get("issues") or []}
+        yield {
+            "type": "citation_check",
+            "ok": False,
+            "issues": check.get("issues") or [],
+            "number_checks": check.get("number_checks") or [],
+        }

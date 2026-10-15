@@ -170,6 +170,13 @@ export type CitationIssue = {
   message?: string;
 };
 
+/** 数字逐字命中明细：答案里一处金额/百分比/日期是否在引用来源中找到依据 */
+export type NumberCheck = {
+  kind: "number" | "date" | "percent";
+  text: string;
+  found: boolean;
+};
+
 export type ConversationEvent = {
   type: "conversation";
   id: string | null;
@@ -298,7 +305,7 @@ export type ChatEvent =
       results: WebSearchResult[];
       error?: string | null;
     }
-  | { type: "citation_check"; ok: boolean; issues: (string | CitationIssue)[] };
+  | { type: "citation_check"; ok: boolean; issues: (string | CitationIssue)[]; number_checks?: NumberCheck[] };
 
 export type ChatTurn = {
   role: "user" | "assistant";

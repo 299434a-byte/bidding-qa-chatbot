@@ -375,7 +375,12 @@ def _citation_check(
         return [], answer_text
     revised = strip_bad_refs(answer_text, check.get("bad_refs") or [])
     events = [
-        {"type": "citation_check", "ok": False, "issues": check.get("issues") or []},
+        {
+            "type": "citation_check",
+            "ok": False,
+            "issues": check.get("issues") or [],
+            "number_checks": check.get("number_checks") or [],
+        },
         {"type": "delta", "channel": "revision", "reason": "citation", "text": revised},
     ]
     return events, revised

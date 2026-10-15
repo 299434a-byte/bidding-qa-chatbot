@@ -37,7 +37,8 @@ REF_4_CAPABILITY = (
 
 _CITE_RE = re.compile(r"\[参考资料(\d+)\]|\[参考(\d+)\]")
 
-_AMOUNT_RE = re.compile(r"(?P<num>\d[\d,]*(?:\.\d+)?)\s*(?P<unit>万元|万|元)")
+# 单位按「长的在前」排列：亿元 先于 亿、万元 先于 万，保证「3.5 亿元」整段命中。
+_AMOUNT_RE = re.compile(r"(?P<num>\d[\d,]*(?:\.\d+)?)\s*(?P<unit>亿元|亿|万元|万|元)")
 
 _PCT_RE = re.compile(r"(?P<num>\d[\d,]*(?:\.\d+)?)\s*(?P<pct>[%％])")
 
@@ -59,6 +60,15 @@ def _to_number(raw: str) -> float | None:
         return None
 
 
+def _amount_factor(unit: str) -> float:
+    """金额单位换算成「元」：亿→1e8、万→1e4、元→1。"""
+    if unit.startswith("亿"):
+        return 100_000_000.0
+    if unit.startswith("万"):
+        return 10_000.0
+    return 1.0
+
+
 def normalize_numbers(text: str | None) -> set[float | str]:
     """把文本里的金额/百分比/日期归一化为可比较的集合。"""
     s = _to_halfwidth(text)
@@ -68,8 +78,7 @@ def normalize_numbers(text: str | None) -> set[float | str]:
         num = _to_number(m.group("num"))
         if num is None:
             continue
-        factor = 10000.0 if m.group("unit") in ("万元", "万") else 1.0
-        out.add(round(num * factor, 4))
+        out.add(round(num * _amount_factor(m.group("unit")), 4))
 
     for m in _PCT_RE.finditer(s):
         num = _to_number(m.group("num"))
@@ -116,6 +125,39 @@ def _fmt_num(value: float | str) -> str:
     return f"{value:g}"
 
 
+def _number_checks(answer: str, basis: set[float | str]) -> list[dict[str, Any]]:
+    """抽取答案里每个金额/百分比/日期的逐字命中明细（按出现顺序，同写法去重）。"""
+    entries: list[tuple[int, str, str, float | str]] = []
+    half = _to_halfwidth(answer)
+
+    for m in _AMOUNT_RE.finditer(half):
+        num = _to_number(m.group("num"))
+        if num is None:
+            continue
+        entries.append((m.start(), "number", m.group(0).strip(), round(num * _amount_factor(m.group("unit")), 4)))
+
+    for m in _PCT_RE.finditer(half):
+        num = _to_number(m.group("num"))
+        if num is None:
+            continue
+        entries.append((m.start(), "percent", m.group(0).strip(), round(num, 6)))
+
+    for m in _DATE_RE.finditer(half):
+        year, month, day = m.group(1), int(m.group(2)), int(m.group(3))
+        if 1 <= month <= 12 and 1 <= day <= 31:
+            entries.append((m.start(), "date", m.group(0).strip(), f"{year}-{month:02d}-{day:02d}"))
+
+    entries.sort(key=lambda e: e[0])
+    checks: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for _, kind, text, value in entries:
+        if (kind, text) in seen:
+            continue
+        seen.add((kind, text))
+        checks.append({"kind": kind, "text": text, "found": value in basis})
+    return checks
+
+
 def verify_citations(answer: str, sources: list[dict[str, Any]]) -> dict[str, Any]:
     """校验回答里的引用编号与数字是否有依据。
 
@@ -159,11 +201,17 @@ def verify_citations(answer: str, sources: list[dict[str, Any]]) -> dict[str, An
                 "message": f"回答中的数值「{_fmt_num(value)}」未能在引用来源中找到依据。",
             })
 
+    # 数字逐字命中明细（新增字段，不改 issues 的既有语义）：
+    # 按答案中的出现顺序列出每个金额/百分比/日期原文写法及是否在引用来源中找到依据，
+    # 供前端给「未命中」的数字加醒目标记（found=True 的只记录、不改变 ok 判定）。
+    number_checks = _number_checks(answer_without_refs, basis)
+
     return {
         "ok": len(issues) == 0,
         "issues": issues,
         "bad_refs": sorted(set(bad_refs)),
         "checked": len(unique_refs) + len(answer_numbers),
+        "number_checks": number_checks,
     }
 
 
