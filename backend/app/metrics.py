@@ -3,6 +3,7 @@
 职责：
   - 记录每次问答的总耗时、首 token、模式、重排结果
   - 汇总为 /api/metrics 的均值 / 中位数 / 命中率
+  - 事件计数（qa_event_counters：如 forced_finalize 强制收口触发次数）
   - 写失败静默降级（不影响问答）
 
 依赖：config
@@ -35,6 +36,18 @@ CREATE TABLE IF NOT EXISTS qa_metrics (
 );
 """
 
+# 事件计数表：记录低频但需要观测频率的事件（如 forced_finalize 强制收口触发次数）。
+# 与 qa_metrics 分开：一次问答只记一条 qa_metrics，但同一事件可在其他维度独立计数。
+_COUNTER_DDL = """
+CREATE TABLE IF NOT EXISTS qa_event_counters (
+    name TEXT PRIMARY KEY,
+    hits INTEGER NOT NULL DEFAULT 0
+);
+"""
+
+# summary 里输出的事件计数名（顶层字段与 key 同名）。
+COUNTER_NAMES = ("forced_finalize",)
+
 _schema_ready: set[str] = set()
 _schema_lock = threading.Lock()
 
@@ -63,6 +76,7 @@ def _ensure_schema(conn: sqlite3.Connection, path: Path) -> None:
         if key in _schema_ready:
             return
         conn.execute(_DDL)
+        conn.execute(_COUNTER_DDL)
         try:
             conn.execute(
                 "ALTER TABLE qa_metrics ADD COLUMN rerank_failed INTEGER NOT NULL DEFAULT 0"
@@ -124,6 +138,25 @@ def record(
         return False
 
 
+def bump(name: str, *, settings: Settings | None = None) -> bool:
+    """事件计数 +1（如 forced_finalize）。成功返回 ``True``；任何失败静默返回 ``False``。"""
+    if name not in COUNTER_NAMES:
+        return False
+    s = settings or get_settings()
+    try:
+        with _connect(s) as conn:
+            _ensure_schema(conn, s.metrics_db_path)
+            conn.execute(
+                "INSERT INTO qa_event_counters (name, hits) VALUES (?, 1) "
+                "ON CONFLICT(name) DO UPDATE SET hits = hits + 1",
+                (name,),
+            )
+            conn.commit()
+        return True
+    except Exception:
+        return False
+
+
 def summary(settings: Settings | None = None) -> dict[str, Any]:
     """汇总指标，返回一个字典（全部失败时返回「空统计」，而不是抛异常）。"""
     s = settings or get_settings()
@@ -139,6 +172,7 @@ def summary(settings: Settings | None = None) -> dict[str, Any]:
         "rerank_failed": 0,
         "rerank_skipped": 0,
         "rerank_success_rate": 0.0,
+        "forced_finalize": 0,
     }
     try:
         with _connect(s) as conn:
@@ -157,6 +191,9 @@ def summary(settings: Settings | None = None) -> dict[str, Any]:
             mode_rows = conn.execute(
                 "SELECT mode, COUNT(*) AS cnt FROM qa_metrics GROUP BY mode"
             ).fetchall()
+            counter_rows = conn.execute(
+                "SELECT name, hits FROM qa_event_counters"
+            ).fetchall()
         total = int(row["total"] or 0)
         mode_distribution = {str(r["mode"]): int(r["cnt"]) for r in mode_rows}
         hits = int(row["hits"] or 0)
@@ -166,6 +203,7 @@ def summary(settings: Settings | None = None) -> dict[str, Any]:
         rerank_applied_rate = round(reranks / total, 4) if total else 0.0
         attempted = reranks + rerank_fails
         rerank_success_rate = round(reranks / attempted, 4) if attempted else 0.0
+        counters = {str(r["name"]): int(r["hits"] or 0) for r in counter_rows}
         return {
             "total": total,
             "avg_elapsed_ms": round(float(row["avg_elapsed"] or 0.0), 1),
@@ -178,6 +216,7 @@ def summary(settings: Settings | None = None) -> dict[str, Any]:
             "rerank_failed": rerank_fails,
             "rerank_skipped": int(row["rerank_skips"] or 0),
             "rerank_success_rate": rerank_success_rate,
+            "forced_finalize": counters.get("forced_finalize", 0),
         }
     except Exception:
         return empty

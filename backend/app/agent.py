@@ -5,6 +5,7 @@
   - 把检索 / PostgreSQL / 图谱 / 联网搜索等工具注册进 ReAct 状态图
   - 流式产出工具调用轨迹与中间消息事件，供 SSE 下发
   - 组装 Agent 系统提示词并维护每轮请求状态快照
+  - 步数上限用尽时强制收口（bind_tools tool_choice=none）逼出最终文字答案
 
 依赖：rag、retriever、rerank、llm、graph、pg、web_search、citation、deep_agent、config
 被谁调用：main（/api/agent/chat）、deep_agent
@@ -16,21 +17,27 @@ import asyncio
 
 from typing import Any, AsyncIterator
 
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from langchain_core.runnables import RunnableConfig
 
 from langchain_core.tools import tool
 
+from langgraph.errors import GraphRecursionError
+
 from langgraph.prebuilt import create_react_agent
 
 from langchain_openai import ChatOpenAI
+
+from . import metrics as metrics_store
 
 from .config import Settings, get_settings
 
 from .graph import GRAPH_TOOL_NAME, query_bidding_graph
 
 from .llm import LLMError, stream_chat
+
+from .logging_setup import get_logger
 
 from .pg import PG_TOOL_NAME, query_bidding_postgres
 
@@ -52,6 +59,8 @@ from .retriever import retrieve
 from .web_search import TOOL_NAME as WEB_TOOL_NAME
 
 from .web_search import search_web_bidding
+
+logger = get_logger(__name__)
 
 TOOL_NAME = "search_bidding_knowledge"
 
@@ -111,6 +120,30 @@ _NO_HIT_NOTICE = (
 _agent_cache: dict[tuple[Any, ...], Any] = {}
 
 
+def _make_chat_model(s: Settings) -> ChatOpenAI:
+    """构造 Agent 用的对话模型（建图与强制收口共用同一套参数）。"""
+    return ChatOpenAI(
+        base_url=s.llm_base_url,
+        api_key=s.llm_api_key,
+        model=s.agent_model_or_default,
+        temperature=s.llm_temperature,
+        max_tokens=s.agent_max_tokens,
+        timeout=s.llm_timeout,
+    )
+
+
+def _collect_tools(s: Settings, use_web: bool) -> list[Any]:
+    """按配置装配本轮可用的工具列表（建图与强制收口共用）。"""
+    tools: list[Any] = [search_bidding_knowledge]
+    if s.pg_configured:
+        tools.append(query_bidding_postgres)
+    if s.graph_configured:
+        tools.append(query_bidding_graph)
+    if use_web:
+        tools.append(search_web_bidding)
+    return tools
+
+
 def _build_agent(s: Settings, web_search_enabled: bool = False) -> Any:
     """构造（并缓存）ReAct Agent。"""
     use_web = bool(web_search_enabled and s.web_search_configured)
@@ -129,21 +162,8 @@ def _build_agent(s: Settings, web_search_enabled: bool = False) -> Any:
     if agent is not None:
         return agent
 
-    model = ChatOpenAI(
-        base_url=s.llm_base_url,
-        api_key=s.llm_api_key,
-        model=s.agent_model_or_default,
-        temperature=s.llm_temperature,
-        max_tokens=s.agent_max_tokens,
-        timeout=s.llm_timeout,
-    )
-    tools: list[Any] = [search_bidding_knowledge]
-    if s.pg_configured:
-        tools.append(query_bidding_postgres)
-    if s.graph_configured:
-        tools.append(query_bidding_graph)
-    if use_web:
-        tools.append(search_web_bidding)
+    model = _make_chat_model(s)
+    tools = _collect_tools(s, use_web)
 
     agent = create_react_agent(
         model,
@@ -240,8 +260,17 @@ def _iter_update_messages(payload: Any) -> list[Any]:
 
 
 def _new_turn_state() -> dict[str, Any]:
-    """一次 ReAct 轮次的跨事件状态（供事件翻译与调用方共同读取）。"""
-    return {"tool_called": False, "sources_emitted": False, "answer_parts": []}
+    """一次 ReAct 轮次的跨事件状态（供事件翻译与调用方共同读取）。
+
+    transcript 按序记录本图执行的完整消息（AIMessage/ToolMessage），
+    步数用尽触发强制收口时把它重放给模型，让最终答案基于已有工具观察。
+    """
+    return {
+        "tool_called": False,
+        "sources_emitted": False,
+        "answer_parts": [],
+        "transcript": [],
+    }
 
 
 def _citation_check(
@@ -386,6 +415,8 @@ async def _stream_react_turn(
             continue
 
         for msg in _iter_update_messages(payload):
+            # updates 流按 super-step 顺序给出完整消息，是强制收口重放的可靠来源
+            turn.setdefault("transcript", []).append(msg)
             if not isinstance(msg, AIMessage) or not getattr(msg, "tool_calls", None):
                 continue
             for call in msg.tool_calls:
@@ -397,6 +428,56 @@ async def _stream_react_turn(
                     "query": str(args.get("query") or question),
                     "arguments": args,
                 }
+
+
+def _prune_transcript(messages: list[Any]) -> list[Any]:
+    """截掉「assistant 声明了 tool_calls 但工具尚未返回」的尾巴。
+
+    步数上限撞在模型输出 tool_calls 之后、工具执行之前时，transcript 会以
+    悬空的 tool_calls 结尾；OpenAI 兼容接口要求每个 tool_calls 都有对应的
+    tool 消息，直接重放会被 400 拒绝。截到最后一条完整 ToolMessage 即可。
+    """
+    last_tool = max(
+        (i for i, m in enumerate(messages) if isinstance(m, ToolMessage)),
+        default=-1,
+    )
+    if last_tool < 0:
+        return []
+    return messages[: last_tool + 1]
+
+
+def _chunk_text(chunk: Any) -> str:
+    """从模型流式分片里取出纯文本（兼容 str 与多模态 list 两种 content 形态）。"""
+    content = getattr(chunk, "content", None)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict) and isinstance(block.get("text"), str):
+                parts.append(block["text"])
+        return "".join(parts)
+    return ""
+
+
+async def _forced_finalize_stream(
+    s: Settings,
+    question: str,
+    history: list[dict[str, Any]] | None,
+    turn: dict[str, Any],
+    *,
+    use_web: bool,
+) -> AsyncIterator[str]:
+    """强制收口轮：禁止工具调用，基于已重放的工具观察流式产出最终文字答案。"""
+    messages: list[Any] = [SystemMessage(content=_agent_system_prompt(s, web_search_enabled=use_web))]
+    messages.extend(_build_messages(question, history, s))
+    messages.extend(_prune_transcript(turn.get("transcript") or []))
+
+    model = _make_chat_model(s).bind_tools(_collect_tools(s, use_web), tool_choice="none")
+    async for chunk in model.astream(messages):
+        text = _chunk_text(chunk)
+        if text:
+            yield text
 
 
 async def agent_events(
@@ -444,6 +525,22 @@ async def agent_events(
     state = states["_rag_state"]
     turn = _new_turn_state()
 
+    async def _failure_events(message: str) -> AsyncIterator[dict[str, Any]]:
+        """最后一道兜底（原有行为）：error → 已有 sources 直问一遍 → done(agent_failed)。"""
+        yield {"type": "error", "message": message}
+        if not turn["sources_emitted"]:
+            yield {"type": "done", "mode": "agent_failed"}
+            return
+        sources = state.get("sources") or []
+        yield {"type": "delta", "text": ""}
+        try:
+            for piece in stream_chat(build_messages(question, sources), s):
+                yield {"type": "delta", "text": piece}
+        except LLMError as inner:
+            yield {"type": "error", "message": str(inner)}
+            yield {"type": "delta", "text": retrieval_only_answer(sources)}
+        yield {"type": "done", "mode": "agent_failed"}
+
     try:
         agent = _build_agent(s, web_search_enabled=use_web)
         async for event in _stream_react_turn(
@@ -455,22 +552,36 @@ async def agent_events(
             recursion_limit=s.agent_max_steps,
         ):
             yield event
-    except Exception as exc:  # noqa: BLE001 - 流式响应里出错只能以事件形式告知前端
-        yield {"type": "error", "message": f"Agent 执行失败：{exc}"}
-
-        if not turn["sources_emitted"]:
-            yield {"type": "done", "mode": "agent_failed"}
-            return
-
-        sources = state.get("sources") or []
-        yield {"type": "delta", "text": ""}
+    except GraphRecursionError:
+        # 步数上限用尽（模型大概率还想调工具）：强制收口，禁止工具、逼出最终文字答案。
+        logger.info(
+            "ReAct 达到步数上限（%d 步），触发强制收口 question=%r",
+            s.agent_max_steps,
+            question,
+        )
+        metrics_store.bump("forced_finalize", settings=s)
+        emitted = ""
         try:
-            for piece in stream_chat(build_messages(question, sources), s):
+            async for piece in _forced_finalize_stream(
+                s, question, history, turn, use_web=use_web
+            ):
+                emitted += piece
+                turn["answer_parts"].append(piece)
                 yield {"type": "delta", "text": piece}
-        except LLMError as inner:
-            yield {"type": "error", "message": str(inner)}
-            yield {"type": "delta", "text": retrieval_only_answer(sources)}
-        yield {"type": "done", "mode": "agent_failed"}
+        except Exception as finalize_exc:  # noqa: BLE001 - 收口失败只能降级到兜底
+            logger.warning("强制收口调用失败：%s", finalize_exc)
+
+        if not emitted.strip():
+            logger.warning("强制收口未产出正文，降级到兜底通道 question=%r", question)
+            async for event in _failure_events(
+                "Agent 执行失败：已达步数上限且强制收口未产出正文"
+            ):
+                yield event
+            return
+        logger.info("强制收口成功，产出 %d 字 question=%r", len(emitted), question)
+    except Exception as exc:  # noqa: BLE001 - 流式响应里出错只能以事件形式告知前端
+        async for event in _failure_events(f"Agent 执行失败：{exc}"):
+            yield event
         return
 
     citation_events, _ = _citation_check(
