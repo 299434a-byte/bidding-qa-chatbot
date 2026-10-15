@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass, field
 
 from typing import Any
@@ -34,6 +36,28 @@ _COVERAGE_STOPWORDS = frozenset({
     "可以", "应该", "需要", "一下", "以及", "还有", "请问", "是否", "有没有",
     "这个", "那个", "这些", "那些", "目前", "现在", "是不是", "能不能",
 })
+
+
+# 条款号（第十二条 / 第12条）、标准号（GB/T 12345、GB 12345）、编号（AB-1203）
+_CLAUSE_RE = re.compile(r"第[一二三四五六七八九十百零0-9]+条")
+_STANDARD_RE = re.compile(r"GB(?:/T)?\s*\d+", re.IGNORECASE)
+_PROJECT_ID_RE = re.compile(r"[A-Z]{2,}[-–]\d+")
+_ID_KEYWORDS = ("编号", "项目号", "公告号")
+
+
+def needs_wider_recall(question: str) -> bool:
+    """条号 / 标准号 / 项目编号类问法是否需要放大候选池。
+
+    这类问法（「第十二条说了什么」「GB/T 12345 怎么规定」「项目 AB-1203 的情况」）
+    常规 10 条召回经常一次捞不全导致答不完整——命中任一模式即放大两路召回。
+    纯函数、可离线单测。
+    """
+    q = (question or "").strip()
+    if not q:
+        return False
+    if _CLAUSE_RE.search(q) or _STANDARD_RE.search(q) or _PROJECT_ID_RE.search(q):
+        return True
+    return any(keyword in q for keyword in _ID_KEYWORDS)
 
 
 def _content_terms(text: str) -> set[str]:
@@ -98,6 +122,7 @@ class RetrievalResult:
     sparse_count: int = 0
     bm25_ready: bool = False
     rerank_meta: dict[str, Any] = field(default_factory=dict)
+    wider_recall: bool = False
 
     @property
     def empty(self) -> bool:
@@ -195,17 +220,23 @@ def retrieve(
     embedder = embedder or get_embedder(s)
     bm25 = bm25 if bm25 is not None else load_bm25(s)
 
+    # 条号 / 标准号 / 编号类问法：候选池放大 max(k*4, 24)（final_k 不变，
+    # 放大的是两路召回的候选，不是送进模型的条数）。
+    wider = needs_wider_recall(question)
+    dense_top_k = max(s.retrieve_dense_top_k * 4, 24) if wider else s.retrieve_dense_top_k
+    sparse_top_k = max(s.retrieve_sparse_top_k * 4, 24) if wider else s.retrieve_sparse_top_k
+
     dense_hits: list[dict[str, Any]] = []
     try:
         query_vector = embedder.embed_query(question)
-        dense_hits = store.search_dense(query_vector, s.retrieve_dense_top_k)
+        dense_hits = store.search_dense(query_vector, dense_top_k)
     except Exception:
         dense_hits = []
 
     sparse_hits: list[dict[str, Any]] = []
     if bm25.ready:
         indices, values = bm25.encode_query(question)
-        sparse_hits = store.search_sparse(indices, values, s.retrieve_sparse_top_k)
+        sparse_hits = store.search_sparse(indices, values, sparse_top_k)
 
     hits = rrf_fuse(
         [("dense", dense_hits), ("bm25", sparse_hits)],
@@ -220,4 +251,5 @@ def retrieve(
         dense_count=len(dense_hits),
         sparse_count=len(sparse_hits),
         bm25_ready=bm25.ready,
+        wider_recall=wider,
     )

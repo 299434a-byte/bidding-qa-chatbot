@@ -149,6 +149,7 @@ def answer_events(
             "final_count": len(result.hits),
             "llm_configured": s.llm_configured,
             "coverage": round(coverage, 4),
+            "wider_recall": result.wider_recall,
             **result.rerank_meta,
         },
     }
