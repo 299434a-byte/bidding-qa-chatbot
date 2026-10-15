@@ -3,10 +3,11 @@
 
 职责：
   - 调 retriever / rerank 得到证据块，组装带来源约束的系统提示词
+  - 覆盖率闸门：检索块与问题关键词重合度不足时拒绝进入生成（防答非所问）
   - 流式生成回答并做引用校验（检索无结果时输出 REF_1 标准文案）
   - 渲染来源引用文本块
 
-依赖：retriever、rerank、llm、citation、config
+依赖：retriever、rerank、llm、citation、config、metrics
 被谁调用：main（/api/chat）、agent、deep_agent
 """
 
@@ -14,13 +15,15 @@ from __future__ import annotations
 
 from typing import Any, Iterator
 
+from . import metrics as metrics_store
+
 from .config import Settings, get_settings
 
 from .llm import LLMError, LLMNotConfigured, stream_chat
 
 from .rerank import rerank_hits
 
-from .retriever import RetrievalResult, retrieve
+from .retriever import RetrievalResult, retrieve, term_coverage
 
 from .citation import REF_1_RETRIEVAL_EMPTY, strip_bad_refs, verify_citations
 
@@ -40,6 +43,16 @@ NO_DATA_MESSAGE = (
     "（若三张源表 `bidding_notices` / `bidding_project` / `companies` 为空，"
     "或数据已灌入但尚未建库，请在后台点击「重建知识库」，"
     "或执行 `python -m app.ingest`（需先停掉后端服务）。）"
+)
+
+# 覆盖率不足时的固定拒答文案（不进生成，避免模型顺着答非所问的资料编造）。
+COVERAGE_REFUSAL_MESSAGE = (
+    "暂无明确依据：检索到的资料与您的问题关键词重合度不足，"
+    "为避免答非所问，本次不作答。\n\n"
+    "**排查建议：**\n"
+    "- 换更具体的关键词重问（如项目名称、编号、公告标题）；\n"
+    "- 开启联网搜索，补充时效性信息；\n"
+    "- 或切换图谱查询，查实体之间的关系。"
 )
 
 
@@ -124,6 +137,9 @@ def answer_events(
         yield {"type": "error", "message": f"检索失败：{exc}"}
         return
 
+    # 第二道判据（与 dense_min_score 并列）：问题实词在最终候选上的最大覆盖率
+    coverage = term_coverage(question, result.hits)
+
     yield {
         "type": "retrieval",
         "meta": {
@@ -132,6 +148,7 @@ def answer_events(
             "bm25_ready": result.bm25_ready,
             "final_count": len(result.hits),
             "llm_configured": s.llm_configured,
+            "coverage": round(coverage, 4),
             **result.rerank_meta,
         },
     }
@@ -145,9 +162,25 @@ def answer_events(
         return
 
     if not s.llm_configured:
+        # 未配置大模型：仅检索列举原文、不生成不编造，覆盖率闸门不介入（保持既有降级行为）。
         yield {"type": "delta", "text": retrieval_only_answer(sources)}
         yield {"type": "done", "mode": "retrieval_only"}
         return
+
+    if coverage < s.coverage_min:
+        # 覆盖率不足 → 不进入生成（字面像但答非所问的资料不给模型编造的机会）
+        metrics_store.bump("coverage_refused", settings=s)
+        yield {
+            "type": "coverage_check",
+            "coverage": round(coverage, 4),
+            "threshold": s.coverage_min,
+            "refused": True,
+        }
+        yield {"type": "delta", "text": COVERAGE_REFUSAL_MESSAGE}
+        yield {"type": "done", "mode": "coverage_refused"}
+        return
+
+    metrics_store.bump("coverage_pass", settings=s)
 
     yield {"type": "delta", "text": ""}
     answer_parts: list[str] = []

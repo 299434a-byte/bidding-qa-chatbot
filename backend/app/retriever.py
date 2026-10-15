@@ -5,6 +5,7 @@
   - 稠密路（Qdrant）与关键词路（BM25）各自召回
   - RRF 排名融合，同一 doc_id 合并计分
   - DENSE_MIN_SCORE 门槛过滤（被 BM25 命中的候选除外）
+  - term_coverage 语义覆盖率（问题实词在候选块上的最大命中比例，供生成前闸门用）
 
 依赖：vector_store、embeddings、bm25、config
 被谁调用：rag、main（/api/retrieve）、agent
@@ -16,7 +17,7 @@ from dataclasses import dataclass, field
 
 from typing import Any
 
-from .bm25 import BM25Index
+from .bm25 import BM25Index, tokenize
 
 from .config import Settings, get_settings
 
@@ -25,6 +26,49 @@ from .embeddings import Embedder, get_embedder
 from .vector_store import VectorStore, get_store
 
 _bm25_cache: dict[str, tuple[float, BM25Index]] = {}
+
+# 覆盖率计算时视为「非实词」的疑问/功能词（单字另按长度过滤）。
+# 只收录多字虚词：业务实词（如「采购」「资质」）绝不能进这张表。
+_COVERAGE_STOPWORDS = frozenset({
+    "什么", "哪些", "哪个", "哪里", "怎么", "怎样", "如何", "为什么", "多少", "几个",
+    "可以", "应该", "需要", "一下", "以及", "还有", "请问", "是否", "有没有",
+    "这个", "那个", "这些", "那些", "目前", "现在", "是不是", "能不能",
+})
+
+
+def _content_terms(text: str) -> set[str]:
+    """问题侧实词集合：jieba 分词 → 过滤单字与疑问虚词。"""
+    return {
+        token
+        for token in tokenize(text or "")
+        if len(token) >= 2 and token not in _COVERAGE_STOPWORDS
+    }
+
+
+def term_coverage(question: str, hits: list[dict[str, Any]]) -> float:
+    """语义覆盖率：问题实词在候选块文本上的**最大**命中比例（0~1）。
+
+    纯函数：不依赖向量库 / 模型 / 配置，可离线单测。
+    0.0 = 没有实词、没有候选、或所有候选都一个实词没命中。
+    与 DENSE_MIN_SCORE 并列的第二道判据：向量分挡不住「字面像但答非所问」，
+    覆盖率把「问题关键词有没有出现在资料里」显式算出来。
+    """
+    terms = _content_terms(question)
+    if not terms or not hits:
+        return 0.0
+
+    best = 0.0
+    for hit in hits:
+        doc_text = str((hit or {}).get("text") or "").lower()
+        if not doc_text:
+            continue
+        # 按子串判断命中（而非块侧 token 集合）：jieba 对「采购企业信用信息」这类
+        # 长名词会整词切出，token 集合会漏掉「企业」，子串匹配不受分词粒度影响。
+        matched = sum(1 for term in terms if term in doc_text)
+        coverage = matched / len(terms)
+        if coverage > best:
+            best = coverage
+    return best
 
 
 def load_bm25(settings: Settings | None = None) -> BM25Index:

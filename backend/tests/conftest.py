@@ -92,6 +92,10 @@ _FAKE_ENV = {
     "CACHE_DB_PATH": str(_SANDBOX / "answer_cache.db"),
     "METRICS_DB_PATH": str(_SANDBOX / "metrics.db"),
     "LOG_FILE_PATH": str(_SANDBOX / "app.log"),
+    # ---- 覆盖率闸门放行（阈值 0 = 恒过）：闸门是全局问答策略，
+    #      与缓存/模型切换/降级通道等无关用例的「假检索道具」不该被它误伤。
+    #      闸门自身的拦截行为由 tests/test_term_coverage.py 直接注入阈值来测。 ----
+    "COVERAGE_MIN": "0",
 }
 
 # 【为什么用「强制赋值」而不是 setdefault】

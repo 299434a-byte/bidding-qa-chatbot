@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS qa_event_counters (
 """
 
 # summary 里输出的事件计数名（顶层字段与 key 同名）。
-COUNTER_NAMES = ("forced_finalize",)
+COUNTER_NAMES = ("forced_finalize", "coverage_refused", "coverage_pass")
 
 _schema_ready: set[str] = set()
 _schema_lock = threading.Lock()
@@ -173,6 +173,8 @@ def summary(settings: Settings | None = None) -> dict[str, Any]:
         "rerank_skipped": 0,
         "rerank_success_rate": 0.0,
         "forced_finalize": 0,
+        "coverage_refused": 0,
+        "coverage_pass": 0,
     }
     try:
         with _connect(s) as conn:
@@ -217,6 +219,8 @@ def summary(settings: Settings | None = None) -> dict[str, Any]:
             "rerank_skipped": int(row["rerank_skips"] or 0),
             "rerank_success_rate": rerank_success_rate,
             "forced_finalize": counters.get("forced_finalize", 0),
+            "coverage_refused": counters.get("coverage_refused", 0),
+            "coverage_pass": counters.get("coverage_pass", 0),
         }
     except Exception:
         return empty

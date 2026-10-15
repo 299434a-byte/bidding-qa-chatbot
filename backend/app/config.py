@@ -129,6 +129,7 @@ class Settings:
     retrieve_final_top_k: int
     rrf_k: int
     dense_min_score: float
+    coverage_min: float
 
     rerank_candidates: int
     rerank_model: str
@@ -334,6 +335,7 @@ def _build_settings() -> Settings:
         retrieve_final_top_k=_int("RETRIEVE_FINAL_TOP_K", 5),
         rrf_k=_int("RRF_K", 60),
         dense_min_score=_float("DENSE_MIN_SCORE", 0.35),
+        coverage_min=_float("COVERAGE_MIN", 0.45),
         rerank_candidates=_int("RERANK_CANDIDATES", 10),
         rerank_model=_str("RERANK_MODEL"),
         rerank_max_chars=_int("RERANK_MAX_CHARS", 300),
