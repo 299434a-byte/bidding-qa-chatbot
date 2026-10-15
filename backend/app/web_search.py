@@ -69,6 +69,7 @@ def render_results(query: str, results: list[dict[str, Any]]) -> str:
     if not results:
         return (
             f"联网搜索：关键词「{query}」没有返回任何结果。\n\n"
+            "建议更换关键词再搜一次（简化查询、换同义词）；再搜仍为空时，"
             "请如实告知用户联网也没有查到，不要编造任何公告标题、链接或日期。"
         )
 
@@ -117,9 +118,15 @@ async def search_web_bidding(query: str, config: RunnableConfig) -> str:
         state["query"] = query
         state["results"] = []
         state["error"] = str(exc)
-        return f"{exc}\n\n请如实告知用户联网搜索未成功，不要编造任何搜索结果。"
+        return (
+            f"{exc}\n\n可尝试更换关键词重试一次；仍失败则如实告知用户联网搜索未成功，"
+            "不要编造任何搜索结果。"
+        )
     except Exception as exc:  # noqa: BLE001 - 工具承诺绝不把异常抛回给 Agent
         state["query"] = query
         state["results"] = []
         state["error"] = f"联网搜索失败：{exc}"
-        return f"联网搜索失败：{exc}\n\n请如实告知用户联网搜索未成功，不要编造任何搜索结果。"
+        return (
+            f"联网搜索失败：{exc}\n\n可尝试更换关键词重试一次；仍失败则如实告知用户"
+            "联网搜索未成功，不要编造任何搜索结果。"
+        )
