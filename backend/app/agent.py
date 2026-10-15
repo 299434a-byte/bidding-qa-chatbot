@@ -268,6 +268,9 @@ def _run_retrieval(query: str, state: dict[str, Any]) -> tuple[str, int]:
     hits, rerank_meta = rerank_hits(query, result.hits, s, top_k=want_k)
     result.hits = hits
     result.rerank_meta = rerank_meta
+    # 检索轮次序号 +1：供 deep 模式判定「这一轮是否真的发生过检索」
+    # （没调检索工具的步骤不参与无增益判定，避免把「直接作答」误判成停滞）。
+    state["retrieval_seq"] = int(state.get("retrieval_seq") or 0) + 1
 
     sources = result.to_sources()
     state["sources"] = sources
@@ -387,6 +390,7 @@ def _new_states(s: Settings, final_k: int | None) -> dict[str, dict[str, Any]]:
             "sources": None,
             "meta": None,
             "hit_count": 0,
+            "retrieval_seq": 0,
         },
         "_pg_state": {
             "settings": s,

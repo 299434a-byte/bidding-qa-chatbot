@@ -20,6 +20,8 @@ from typing import Any, AsyncIterator
 
 from langchain_core.messages import HumanMessage
 
+from . import metrics as metrics_store
+
 from .agent import (
     _build_agent,
     _citation_check,
@@ -73,6 +75,11 @@ def _dedupe_sources(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
             seen.add(key)
         out.append(src)
     return out
+
+
+def _hit_id_set(sources: list[dict[str, Any]] | None) -> set[str]:
+    """本轮命中的 chunk 标识集合（doc_id 是「表:主键:段号」级的稳定标识）。"""
+    return {str(s.get("doc_id") or "") for s in (sources or []) if s.get("doc_id")}
 
 
 def _merge_meta(metas: list[dict[str, Any]], final_count: int, s: Settings) -> dict[str, Any]:
@@ -258,6 +265,10 @@ async def run_deep_events(
     observations: list[str] = []
     collected: list[dict[str, Any]] = []
     metas: list[dict[str, Any]] = []
+    # 无增益判定：只跟「上一次真正发生过检索」的步骤比（retrieval_seq 未变 = 本轮没调检索）。
+    prev_hit_ids: set[str] | None = None
+    prev_seq = 0
+    no_gain_round = 0
 
     try:
         agent = _build_agent(s, web_search_enabled=use_web)
@@ -330,6 +341,36 @@ async def run_deep_events(
             "error": step_error,
         }
 
+        # —— 无增益判定：最近两轮检索命中的 chunk 集合完全相同 → 立即终止重试 ——
+        # 改写检索词后还是同一批切片，继续跑只会白烧 LLM；转入 FALLBACK（仅检索列证据）。
+        seq = int(states["_rag_state"].get("retrieval_seq") or 0)
+        if seq != prev_seq:
+            step_ids = _hit_id_set(snapshot["sources"])
+            if prev_hit_ids is not None and step_ids == prev_hit_ids:
+                no_gain_round = i
+                for j in range(i + 1, len(steps) + 1):
+                    yield {
+                        "type": "plan_step",
+                        "index": j,
+                        "title": steps[j - 1]["title"],
+                        "status": "failed",
+                        "observation": None,
+                        "error": "最近两轮检索命中完全相同（无增益），已提前终止",
+                    }
+                break
+            prev_hit_ids = step_ids
+        prev_seq = seq
+
+    if no_gain_round:
+        metrics_store.bump("no_gain_stop", settings=s)
+        yield {"type": "no_gain", "reason": "no_gain", "round": no_gain_round}
+        sources = _dedupe_sources(collected)
+        yield {"type": "retrieval", "meta": _merge_meta(metas, len(sources), s)}
+        yield {"type": "sources", "sources": sources}
+        yield {"type": "delta", "text": _fallback_answer(sources), "channel": "answer"}
+        yield {"type": "done", "mode": done_mode, "reason": "no_gain"}
+        return
+
     sources = _dedupe_sources(collected)
     yield {"type": "retrieval", "meta": _merge_meta(metas, len(sources), s)}
     yield {"type": "sources", "sources": sources}
@@ -354,10 +395,14 @@ async def run_deep_events(
             timeout=s.deep_timeout,
             on_thinking=_on_thinking,
         ):
-            yield from _drain_thinking()
+            # async def 里不允许 yield from（93bf6e1 曾在此引入 SyntaxError），
+            # 逐个转手 _drain_thinking 的产出，行为等价。
+            for drain_event in _drain_thinking():
+                yield drain_event
             answer_parts.append(piece)
             yield {"type": "delta", "text": piece, "channel": "answer"}
-        yield from _drain_thinking()
+        for drain_event in _drain_thinking():
+            yield drain_event
     except LLMError as exc:
         yield {"type": "error", "message": str(exc)}
 
