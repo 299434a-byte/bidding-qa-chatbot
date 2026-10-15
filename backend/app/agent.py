@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import asyncio
 
+from pathlib import Path
+
 from typing import Any, AsyncIterator
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -64,7 +66,50 @@ logger = get_logger(__name__)
 
 TOOL_NAME = "search_bidding_knowledge"
 
+SKILL_TOOL_NAME = "load_skill"
+
 MODES = ("react", "plan", "deep")
+
+# 业务技能文档目录（项目根 docs/skills/）。目录常驻提示词、正文按需 load_skill 读取。
+_SKILLS_DIR = Path(__file__).resolve().parents[2] / "docs" / "skills"
+
+# 目录扫描结果缓存（首次用到时扫描一次；目录不存在或为空时不注册 load_skill）。
+_skills_catalog: list[dict[str, str]] | None = None
+
+
+def _scan_skills() -> list[dict[str, str]]:
+    """扫描技能目录，缓存「文件名（技能名）+ 一句话说明」目录。"""
+    global _skills_catalog
+    if _skills_catalog is not None:
+        return _skills_catalog
+    entries: list[dict[str, str]] = []
+    if _SKILLS_DIR.is_dir():
+        for path in sorted(_SKILLS_DIR.glob("*.md")):
+            summary = ""
+            for line in path.read_text(encoding="utf-8").splitlines():
+                text = line.strip()
+                # 跳过空行与 markdown 标题行，取第一个正文段落作一句话说明。
+                if text and not text.startswith("#"):
+                    summary = text[:80]
+                    break
+            entries.append({"name": path.stem, "summary": summary})
+    _skills_catalog = entries
+    return entries
+
+
+@tool
+def load_skill(name: str) -> str:
+    """按需读取一份业务技能说明全文（字段口径、法规速查、回答自查清单等）。目录见系统提示词。"""
+    catalog = {entry["name"]: entry for entry in _scan_skills()}
+    entry = catalog.get((name or "").strip())
+    if entry is None:
+        available = "、".join(catalog) or "（当前没有可用技能）"
+        return f"没有名为「{name}」的技能。当前可用技能：{available}。请用准确的技能名重试。"
+    path = _SKILLS_DIR / f"{entry['name']}.md"
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError as exc:  # pragma: no cover - 目录扫描到读取之间文件被移走的极端情况
+        return f"技能「{name}」读取失败：{exc}。请直接依据已有知识回答，不要重试。"
 
 
 def _agent_system_prompt(s: Settings, web_search_enabled: bool = False) -> str:
@@ -98,6 +143,18 @@ def _agent_system_prompt(s: Settings, web_search_enabled: bool = False) -> str:
         f"{next_no + 1}. 调用工具时可以按需改写检索词（例如补全项目类型、资质关键词），以便命中更准。",
         f"{next_no + 2}. 引用知识库来源时沿用 [参考资料N] 标注；表格类结论用 Markdown 表格呈现。",
     ]
+
+    catalog = _scan_skills()
+    if catalog:
+        skill_lines = "\n".join(f"- {entry['name']}：{entry['summary']}" for entry in catalog)
+        lines += [
+            "",
+            "业务技能（load_skill 工具，渐进式披露：这里只有目录，正文要用工具换取）：",
+            "需要某份口径/规范的完整内容时（例如字段含义与统计口径、法规条文细节、回答自查清单），"
+            "先调用 load_skill(name) 读取对应技能全文，再据此回答；不要凭记忆猜口径。",
+            "可用技能目录：",
+            skill_lines,
+        ]
     if web_search_enabled:
         lines += [
             "",
@@ -157,6 +214,9 @@ def _make_chat_model(s: Settings) -> ChatOpenAI:
 def _collect_tools(s: Settings, use_web: bool) -> list[Any]:
     """按配置装配本轮可用的工具列表（建图与强制收口共用）。"""
     tools: list[Any] = [search_bidding_knowledge]
+    # 技能目录非空才注册（与「未配置的工具不注册」一致：没有技能文件就不给模型这个工具）。
+    if _scan_skills():
+        tools.append(load_skill)
     if s.pg_configured:
         tools.append(query_bidding_postgres)
     if s.graph_configured:
@@ -420,6 +480,9 @@ async def _stream_react_turn(
                         "name": WEB_TOOL_NAME,
                         "count": len(results),
                     }
+                elif chunk.name == SKILL_TOOL_NAME:
+                    # 技能读取是「换提示词正文」，不是检索：不触发 sources，结果按 1 份计。
+                    yield {"type": "tool_result", "name": SKILL_TOOL_NAME, "count": 1}
                 else:
                     if emit_sources and not turn["sources_emitted"]:
                         yield {"type": "retrieval", "meta": rag_state.get("meta") or {}}
