@@ -117,14 +117,19 @@ def _fmt_num(value: float | str) -> str:
 
 
 def verify_citations(answer: str, sources: list[dict[str, Any]]) -> dict[str, Any]:
-    """校验回答里的引用编号与数字是否有依据。"""
+    """校验回答里的引用编号与数字是否有依据。
+
+    返回 ``checked`` = 本轮被检查的条目数（去重引用编号数 + 归一化数值数），
+    供评测侧计算「无依据条数 ÷ 总校验条数」这类代理指标。
+    """
     sources = list(sources or [])
     n_sources = len(sources)
     issues: list[dict[str, Any]] = []
     bad_refs: list[int] = []
 
     refs = _extract_refs(answer)
-    for n in sorted(set(refs)):
+    unique_refs = sorted(set(refs))
+    for n in unique_refs:
         if n < 1 or n > n_sources:
             issues.append({
                 "type": "ref_out_of_range",
@@ -154,7 +159,12 @@ def verify_citations(answer: str, sources: list[dict[str, Any]]) -> dict[str, An
                 "message": f"回答中的数值「{_fmt_num(value)}」未能在引用来源中找到依据。",
             })
 
-    return {"ok": len(issues) == 0, "issues": issues, "bad_refs": sorted(set(bad_refs))}
+    return {
+        "ok": len(issues) == 0,
+        "issues": issues,
+        "bad_refs": sorted(set(bad_refs)),
+        "checked": len(unique_refs) + len(answer_numbers),
+    }
 
 
 def strip_bad_refs(answer: str, bad_refs: list[int]) -> str:

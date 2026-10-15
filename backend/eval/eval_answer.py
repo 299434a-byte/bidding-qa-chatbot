@@ -8,6 +8,9 @@
 #     · 忠实度（faithfulness）：有没有忠于资料、没瞎编；
 #     · 相关度（relevance）：有没有答到点上；
 #     · 完整性（completeness）：参考答案要点覆盖了没有。
+#   另外零标注产出两个**生成层代理指标**（复用 citation 引用校验，非 RAGAS 原版）：
+#     · faithfulness：引用校验通过率 + 无依据条数占比；
+#     · context_precision：回答实际引用的来源编号数 ÷ 本轮来源总数（逐题取均值）。
 #
 # 【两条硬性纪律】
 #   1) 考官提示词固定、temperature=0，保证同一份回答多次评分尽量一致；
@@ -33,6 +36,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from app.agent import agent_events  # noqa: E402
+from app.citation import _extract_refs, verify_citations  # noqa: E402
 from app.config import get_settings  # noqa: E402
 from app.llm import LLMError, LLMNotConfigured, complete_chat  # noqa: E402
 from app.rerank import extract_json  # noqa: E402
@@ -86,11 +90,12 @@ def parse_scores(raw: str) -> dict[str, int] | None:
     return scores
 
 
-async def run_question(question: str, s: Any) -> tuple[str, list[str], str | None]:
-    """跑一遍完整问答链路，返回 (回答正文, 调用过的工具名列表, 错误信息)。"""
+async def run_question(question: str, s: Any) -> tuple[str, list[str], str | None, list[dict[str, Any]]]:
+    """跑一遍完整问答链路，返回 (回答正文, 调用过的工具名列表, 错误信息, 本轮来源)。"""
     parts: list[str] = []
     tools: list[str] = []
     error: str | None = None
+    sources: list[dict[str, Any]] = []
     async for event in agent_events(question, settings=s, mode="react"):
         etype = event.get("type")
         if etype == "delta":
@@ -99,9 +104,49 @@ async def run_question(question: str, s: Any) -> tuple[str, list[str], str | Non
             name = event.get("name")
             if name and name not in tools:
                 tools.append(name)
+        elif etype == "sources":
+            sources = event.get("sources") or []
         elif etype == "error":
             error = event.get("message")
-    return "".join(parts).strip(), tools, error
+    return "".join(parts).strip(), tools, error, sources
+
+
+def proxy_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """生成层代理指标：faithfulness / context_precision（复用引用校验，零标注成本）。
+
+    · faithfulness_pass_rate = 引用校验通过的回答数 ÷ 有回答的总数；
+    · faithfulness_unsupported_rate = 无依据的数值/引用条数 ÷ 总校验条数；
+    · context_precision = 每个回答「实际引用的来源编号数 ÷ 本轮来源总数」的均值。
+
+    这是**代理指标，不是 RAGAS 原版**：本项目相关性标注只到 doc 级、没有多级相关性，
+    硬套 RAGAS 的分级口径会失真；这里只用现成的 citation 校验产出可对比的量化数字。
+    分母为 0（没有可算的题）时返回 None，渲染为「—」，不编造 0 分。
+    """
+    answered = [r for r in rows if (r.get("answer") or "").strip()]
+    faith_pass = 0
+    unsupported = 0
+    checked_total = 0
+    precisions: list[float] = []
+    for row in answered:
+        sources = row.get("sources") or []
+        check = verify_citations(row["answer"], sources)
+        if check.get("ok"):
+            faith_pass += 1
+        unsupported += len(check.get("issues") or [])
+        checked_total += int(check.get("checked") or 0)
+        if sources:
+            cited = {n for n in _extract_refs(row["answer"]) if 1 <= n <= len(sources)}
+            precisions.append(len(cited) / len(sources))
+    return {
+        "answered": len(answered),
+        "faith_pass": faith_pass,
+        "faith_pass_rate": (faith_pass / len(answered)) if answered else None,
+        "unsupported": unsupported,
+        "checked_total": checked_total,
+        "unsupported_rate": (unsupported / checked_total) if checked_total else None,
+        "with_sources": len(precisions),
+        "context_precision": (mean(precisions) if precisions else None),
+    }
 
 
 def judge(question: str, key_points: list[str], answer: str, s: Any) -> dict[str, int] | None:
@@ -156,15 +201,48 @@ def _print_markdown(rows: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _fmt_rate(value: float | None) -> str:
+    """百分比渲染：None（分母为 0、无可算的题）显示为「—」，不冒充 0 分。"""
+    if value is None:
+        return "—"
+    return f"{value:.3f}"
+
+
+def _print_proxy_section(px: dict[str, Any]) -> str:
+    """渲染「生成层代理指标」小节（faithfulness / context_precision）。"""
+    lines: list[str] = []
+    lines.append("### 生成层代理指标（faithfulness / context_precision）\n")
+    lines.append("| 指标 | 数值 |")
+    lines.append("| --- | --- |")
+    lines.append(
+        f"| faithfulness（引用校验通过率） | {_fmt_rate(px['faith_pass_rate'])}"
+        f"（{px['faith_pass']}/{px['answered']} 题有回答） |"
+    )
+    lines.append(
+        f"| faithfulness（无依据条数占比） | {_fmt_rate(px['unsupported_rate'])}"
+        f"（{px['unsupported']}/{px['checked_total']} 条） |"
+    )
+    lines.append(
+        f"| context_precision（引用来源占比均值） | {_fmt_rate(px['context_precision'])}"
+        f"（{px['with_sources']} 题有来源） |"
+    )
+    lines.append("")
+    lines.append(
+        "> **代理指标，非 RAGAS 原版**：本项目相关性标注只到 doc 级、没有多级相关性，"
+        "硬套 RAGAS 的分级口径会失真；此处复用现成的 citation 引用校验产出可对比的量化数字。"
+    )
+    return "\n".join(lines)
+
+
 async def _run_all(items: list[dict[str, Any]], s: Any) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for item in items:
         print(f"运行 {item['id']}：{item['question']}")
         try:
-            answer, tools, error = await run_question(item["question"], s)
+            answer, tools, error, sources = await run_question(item["question"], s)
         except Exception as exc:  # noqa: BLE001
             print(f"  问答链路异常：{exc!r}", file=sys.stderr)
-            answer, tools, error = "", [], f"{exc!r}"
+            answer, tools, error, sources = "", [], f"{exc!r}", []
         if error:
             print(f"  链路 error 事件：{error}", file=sys.stderr)
         scores = judge(item["question"], item.get("key_points") or [], answer, s)
@@ -174,8 +252,9 @@ async def _run_all(items: list[dict[str, Any]], s: Any) -> list[dict[str, Any]]:
             "answer": answer,
             "tools": tools,
             "scores": scores,
+            "sources": sources,
         })
-        print(f"  回答长度={len(answer)} 工具={tools} 评分={scores}")
+        print(f"  回答长度={len(answer)} 工具={tools} 评分={scores} 来源={len(sources)}")
     return rows
 
 
@@ -195,7 +274,7 @@ def main() -> int:
 
     items = load_eval_set(Path(args.set))
     rows = asyncio.run(_run_all(items, s))
-    md = _print_markdown(rows)
+    md = _print_markdown(rows) + "\n\n" + _print_proxy_section(proxy_metrics(rows))
     print(md)
     if args.out:
         Path(args.out).write_text(md + "\n", encoding="utf-8")
