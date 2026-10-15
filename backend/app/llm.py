@@ -12,9 +12,22 @@
 
 from __future__ import annotations
 
-from typing import AsyncIterator, Iterator
+from typing import Any, AsyncIterator, Callable, Iterator
 
 from .config import Settings, get_settings
+
+
+def _delta_piece(delta: Any, on_thinking: Callable[[str], None] | None) -> str | None:
+    """从流式增量里分流：reasoning_content 走 on_thinking 回调，正文作为返回值。
+
+    DeepSeek 等推理模型先吐一大段思维链（delta.reasoning_content）再出正文；
+    两者必须分开——思维链混进正文会污染答案，不吐出去用户又要干等十几秒。
+    """
+    reasoning = getattr(delta, "reasoning_content", None)
+    if reasoning and on_thinking:
+        on_thinking(reasoning)
+    content = getattr(delta, "content", None)
+    return content if content else None
 
 
 class LLMNotConfigured(RuntimeError):
@@ -64,8 +77,9 @@ def stream_chat(
     temperature: float | None = None,
     max_tokens: int | None = None,
     timeout: int | None = None,
+    on_thinking: Callable[[str], None] | None = None,
 ) -> Iterator[str]:
-    """流式生成回答，逐段 yield 文本增量。"""
+    """流式生成回答，逐段 yield 正文增量；思维链经 ``on_thinking`` 回调单独产出。"""
     s = settings or get_settings()
     client = _client(s, timeout=timeout)
     try:
@@ -79,8 +93,7 @@ def stream_chat(
         for chunk in stream:
             if not getattr(chunk, "choices", None):
                 continue
-            delta = chunk.choices[0].delta
-            content = getattr(delta, "content", None)
+            content = _delta_piece(chunk.choices[0].delta, on_thinking)
             if content:
                 yield content
     except Exception as exc:
@@ -95,6 +108,7 @@ async def astream_chat(
     temperature: float | None = None,
     max_tokens: int | None = None,
     timeout: int | None = None,
+    on_thinking: Callable[[str], None] | None = None,
 ) -> AsyncIterator[str]:
     """``stream_chat`` 的异步版本（用 ``AsyncOpenAI``，不阻塞事件循环）。"""
     s = settings or get_settings()
@@ -110,8 +124,7 @@ async def astream_chat(
         async for chunk in stream:
             if not getattr(chunk, "choices", None):
                 continue
-            delta = chunk.choices[0].delta
-            content = getattr(delta, "content", None)
+            content = _delta_piece(chunk.choices[0].delta, on_thinking)
             if content:
                 yield content
     except Exception as exc:

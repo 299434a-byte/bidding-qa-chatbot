@@ -151,10 +151,23 @@ def answer_events(
 
     yield {"type": "delta", "text": ""}
     answer_parts: list[str] = []
+    # 思维链缓冲：stream_chat 在正文间隙回调 on_thinking，这里转成独立的 thinking 事件
+    # 下发（绝不混进 delta 正文）。
+    thinking_parts: list[str] = []
+
+    def _on_thinking(text: str) -> None:
+        thinking_parts.append(text)
+
+    def _drain_thinking():
+        while thinking_parts:
+            yield {"type": "thinking", "delta": thinking_parts.pop(0)}
+
     try:
-        for piece in stream_chat(build_messages(question, sources), s):
+        for piece in stream_chat(build_messages(question, sources), s, on_thinking=_on_thinking):
+            yield from _drain_thinking()
             answer_parts.append(piece)
             yield {"type": "delta", "text": piece}
+        yield from _drain_thinking()
     except LLMNotConfigured:
         yield {"type": "delta", "text": retrieval_only_answer(sources)}
         yield {"type": "done", "mode": "retrieval_only"}

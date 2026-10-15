@@ -405,6 +405,9 @@ export default function Home() {
           else if (event.type === "delta")
             // delta 先进缓冲，由定时器每 ≥50ms 合并落库一次（正文 / revision 两通道各自累计）
             bufferDelta(event.channel ?? "answer", event.text ?? "", event.reason);
+          else if (event.type === "thinking")
+            // 思维链单独累积到 msg.thinking（MessageBubble 渲染为可折叠「思考过程」卡）
+            patch((msg) => ({ ...msg, thinking: (msg.thinking ?? "") + event.delta }));
           else if (event.type === "plan")
             patch((msg) => ({ ...msg, plan: event.steps, planFallback: event.fallback }));
           else if (event.type === "plan_step")

@@ -259,6 +259,8 @@ export type ChatEvent =
   | { type: "retrieval"; meta: RetrievalMeta }
   | { type: "sources"; sources: Source[] }
   | { type: "delta"; text: string; channel?: "answer" | "revision"; reason?: "citation" }
+  /** 推理模型的思维链增量（与正文 delta 分两路，绝不混入正文） */
+  | { type: "thinking"; delta: string }
   | { type: "done"; mode: string }
   | { type: "error"; message: string }
   | ConversationEvent

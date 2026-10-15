@@ -44,7 +44,8 @@ class _FakeLLM:
     def __init__(self) -> None:
         self.calls = 0
 
-    def __call__(self, messages, settings):
+    def __call__(self, messages, settings, **kwargs):
+        # **kwargs：兼容 stream_chat 的可选关键字参数（如 on_thinking）。
         self.calls += 1
         yield "该项目预算为 1590 万元 [参考资料1]。"
 

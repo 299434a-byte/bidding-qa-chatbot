@@ -120,9 +120,31 @@ _NO_HIT_NOTICE = (
 _agent_cache: dict[tuple[Any, ...], Any] = {}
 
 
+class ReasoningChatOpenAI(ChatOpenAI):
+    """透传推理模型思维链的 ChatOpenAI。
+
+    langchain_openai 基类不提取 ``delta.reasoning_content``（文档明说要用
+    provider 子类），DeepSeek 的思维链会被整段丢掉、用户在思考期间干等。
+    这里在 chunk → message 的转换点把 reasoning_content 挂进
+    ``additional_kwargs``，同步/异步流式共用该转换，一处覆盖全链路。
+    """
+
+    def _convert_chunk_to_generation_chunk(self, chunk, default_chunk_class, base_generation_info):
+        generation = super()._convert_chunk_to_generation_chunk(
+            chunk, default_chunk_class, base_generation_info
+        )
+        if generation is not None:
+            choices = chunk.get("choices") or []
+            if choices:
+                reasoning = (choices[0].get("delta") or {}).get("reasoning_content")
+                if isinstance(reasoning, str) and reasoning:
+                    generation.message.additional_kwargs["reasoning_content"] = reasoning
+        return generation
+
+
 def _make_chat_model(s: Settings) -> ChatOpenAI:
     """构造 Agent 用的对话模型（建图与强制收口共用同一套参数）。"""
-    return ChatOpenAI(
+    return ReasoningChatOpenAI(
         base_url=s.llm_base_url,
         api_key=s.llm_api_key,
         model=s.agent_model_or_default,
@@ -408,10 +430,16 @@ async def _stream_react_turn(
                         "name": chunk.name or TOOL_NAME,
                         "count": rag_state.get("hit_count", 0),
                     }
-            elif isinstance(chunk, AIMessage) and chunk.content:
-                if emit_delta:
-                    turn.setdefault("answer_parts", []).append(chunk.content)
-                yield {"type": "delta" if emit_delta else "step_text", "text": chunk.content}
+            elif isinstance(chunk, AIMessage):
+                # 思维链单独一路（thinking 事件），绝不混进正文 delta；
+                # ReasoningChatOpenAI 已把 delta.reasoning_content 挂进 additional_kwargs。
+                reasoning = (getattr(chunk, "additional_kwargs", None) or {}).get("reasoning_content")
+                if isinstance(reasoning, str) and reasoning:
+                    yield {"type": "thinking", "delta": reasoning}
+                if chunk.content:
+                    if emit_delta:
+                        turn.setdefault("answer_parts", []).append(chunk.content)
+                    yield {"type": "delta" if emit_delta else "step_text", "text": chunk.content}
             continue
 
         for msg in _iter_update_messages(payload):
@@ -467,17 +495,23 @@ async def _forced_finalize_stream(
     turn: dict[str, Any],
     *,
     use_web: bool,
-) -> AsyncIterator[str]:
-    """强制收口轮：禁止工具调用，基于已重放的工具观察流式产出最终文字答案。"""
+) -> AsyncIterator[dict[str, Any]]:
+    """强制收口轮：禁止工具调用，基于已重放的工具观察流式产出最终文字答案。
+
+    产出 thinking / delta 两类事件（收口轮的思维链同样单独一路下发）。
+    """
     messages: list[Any] = [SystemMessage(content=_agent_system_prompt(s, web_search_enabled=use_web))]
     messages.extend(_build_messages(question, history, s))
     messages.extend(_prune_transcript(turn.get("transcript") or []))
 
     model = _make_chat_model(s).bind_tools(_collect_tools(s, use_web), tool_choice="none")
     async for chunk in model.astream(messages):
+        reasoning = (getattr(chunk, "additional_kwargs", None) or {}).get("reasoning_content")
+        if isinstance(reasoning, str) and reasoning:
+            yield {"type": "thinking", "delta": reasoning}
         text = _chunk_text(chunk)
         if text:
-            yield text
+            yield {"type": "delta", "text": text}
 
 
 async def agent_events(
@@ -562,12 +596,14 @@ async def agent_events(
         metrics_store.bump("forced_finalize", settings=s)
         emitted = ""
         try:
-            async for piece in _forced_finalize_stream(
+            async for event in _forced_finalize_stream(
                 s, question, history, turn, use_web=use_web
             ):
-                emitted += piece
-                turn["answer_parts"].append(piece)
-                yield {"type": "delta", "text": piece}
+                if event.get("type") == "delta":
+                    piece = str(event.get("text") or "")
+                    emitted += piece
+                    turn["answer_parts"].append(piece)
+                yield event
         except Exception as finalize_exc:  # noqa: BLE001 - 收口失败只能降级到兜底
             logger.warning("强制收口调用失败：%s", finalize_exc)
 

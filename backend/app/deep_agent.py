@@ -305,7 +305,7 @@ async def run_deep_events(
                 etype = event.get("type")
                 if etype == "step_text":
                     parts.append(str(event.get("text") or ""))
-                elif etype in ("tool_call", "tool_result", "sql_query", "graph_query", "web_search"):
+                elif etype in ("tool_call", "tool_result", "sql_query", "graph_query", "web_search", "thinking"):
                     yield event
         except Exception as exc:  # noqa: BLE001 - 单步失败只标记该步，不中断整轮
             step_error = str(exc)
@@ -335,6 +335,16 @@ async def run_deep_events(
     yield {"type": "sources", "sources": sources}
 
     answer_parts: list[str] = []
+    # 思维链缓冲：综合阶段的 reasoning 增量转成独立 thinking 事件（不混进正文）。
+    thinking_parts: list[str] = []
+
+    def _on_thinking(text: str) -> None:
+        thinking_parts.append(text)
+
+    def _drain_thinking():
+        while thinking_parts:
+            yield {"type": "thinking", "delta": thinking_parts.pop(0)}
+
     try:
         async for piece in astream_chat(
             _solve_messages(question, steps, observations, sources),
@@ -342,9 +352,12 @@ async def run_deep_events(
             model=s.agent_model_or_default,
             max_tokens=s.deep_max_tokens,
             timeout=s.deep_timeout,
+            on_thinking=_on_thinking,
         ):
+            yield from _drain_thinking()
             answer_parts.append(piece)
             yield {"type": "delta", "text": piece, "channel": "answer"}
+        yield from _drain_thinking()
     except LLMError as exc:
         yield {"type": "error", "message": str(exc)}
 
@@ -389,6 +402,11 @@ async def run_deep_events(
                 break
 
             revision_parts: list[str] = []
+            revision_thinking: list[str] = []
+
+            def _on_revision_thinking(text: str) -> None:
+                revision_thinking.append(text)
+
             try:
                 async for piece in astream_chat(
                     _solve_messages(question, steps, observations, sources)
@@ -403,9 +421,14 @@ async def run_deep_events(
                     model=s.agent_model_or_default,
                     max_tokens=s.deep_max_tokens,
                     timeout=s.deep_timeout,
+                    on_thinking=_on_revision_thinking,
                 ):
+                    while revision_thinking:
+                        yield {"type": "thinking", "delta": revision_thinking.pop(0)}
                     revision_parts.append(piece)
                     yield {"type": "delta", "text": piece, "channel": "revision"}
+                while revision_thinking:
+                    yield {"type": "thinking", "delta": revision_thinking.pop(0)}
             except LLMError as exc:
                 yield {"type": "error", "message": str(exc)}
 

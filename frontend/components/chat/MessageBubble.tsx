@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import Icon from "@/components/ui/icons";
 import ToolTrace from "@/components/chat/ToolTrace";
 import { mdToHtml } from "@/lib/markdown";
@@ -45,6 +45,8 @@ export type Message = {
   imageResult?: { text: string; model: string | null };
   sources?: Source[];
   meta?: RetrievalMeta;
+  /** 推理模型的思维链全文（thinking 事件逐段累积；没有则整块不渲染） */
+  thinking?: string;
   toolCalls?: (ToolCallInfo & { count?: number })[];
   sqlQueries?: SqlQueryInfo[];
   graphQueries?: GraphQueryInfo[];
@@ -124,6 +126,11 @@ function MessageBubble({ msg, highlighted, busy, onFillInput, onAdopt, onOpenEvi
   const revisionHtml = useMemo(() => (msg.revision ? mdToHtml(msg.revision, { citeMax }) : ""), [msg.revision, citeMax]);
 
   const bodyRef = useRef<HTMLDivElement>(null);
+  /** 思考过程折叠卡：流式期间默认展开，结束后自动折叠一次（用户仍可手动展开） */
+  const thinkingRef = useRef<HTMLDetailsElement>(null);
+  useEffect(() => {
+    if (!msg.streaming && thinkingRef.current) thinkingRef.current.open = false;
+  }, [msg.streaming]);
   /** 悬停中的引用信息（编号 + 相对 .msg-body 的定位） */
   const [citeHover, setCiteHover] = useState<{ n: number; top: number; left: number } | null>(null);
 
@@ -256,6 +263,19 @@ function MessageBubble({ msg, highlighted, busy, onFillInput, onAdopt, onOpenEvi
                 </div>
                 <div className="vision-card-body">{msg.imageResult.text}</div>
               </div>
+            )}
+
+            {/* 思考过程（推理模型思维链）：可折叠卡，样式复用 ToolTrace 的 trace-item。
+                没有 thinking 事件（老流程 / 非推理模型）时整块不出现。 */}
+            {msg.thinking && (
+              <details className="trace-item thinking-card" ref={thinkingRef} open data-testid="thinking">
+                <summary className="trace-summary">
+                  <span className="badge badge-plain">思考过程</span>
+                  <span className="mono-num">{msg.thinking.length} 字</span>
+                  <span className="badge badge-plain">{msg.streaming ? "思考中…" : "已折叠"}</span>
+                </summary>
+                <pre className="trace-code">{msg.thinking}</pre>
+              </details>
             )}
 
             {/* 首 token 前：骨架行占位（内容来了就消失） */}
