@@ -306,14 +306,31 @@ cd backend
 
 ```powershell
 cd backend
-# 跑全部用例（当前 172 个）
+# 跑全部用例（当前 188 个）
 ..\.venv\Scripts\python.exe -m pytest tests -v
-# 用例 + 覆盖率（真实数字：172 个用例，覆盖率 64.10%）
+# 用例 + 覆盖率（真实数字：188 个用例，覆盖率 68.45%）
 ..\.venv\Scripts\python.exe -m pytest tests --cov=app --cov-report=term
 ```
 
 - `backend/tests/` 下的用例全部**离线**运行（`conftest.py` 预置假环境变量，不连真实数据库 / 向量库 / 大模型，也不触碰 `data/` 目录），覆盖 BM25 打分、RRF 融合、重排解析、文档切块、引用校验、增量建库差集、只读 SQL 护栏等纯函数与逻辑模块。测试纪律：**断言行为（事件流 / 返回值 / 异常 / 落库结果），不断言配置值、调用计数、内部标志位这类实现细节**。
-- **172 个用例，当前覆盖率 64.10%**；`backend/pytest.ini` 里设了 **18% 的覆盖率门槛**——低于门槛 pytest 直接失败，防止后续改动让测试静默倒退。门槛刻意定得低：后端大量代码是与外部服务（数据库 / 大模型 / 图谱）交互的胶水层，离线单测测不了也不值得为凑数字而写。
+- **188 个用例，当前覆盖率 68.45%**；`backend/pytest.ini` 里设了 **18% 的覆盖率门槛**——低于门槛 pytest 直接失败，防止后续改动让测试静默倒退。门槛刻意定得低：后端大量代码是与外部服务（数据库 / 大模型 / 图谱）交互的胶水层，离线单测测不了也不值得为凑数字而写。
+
+### 改动后必跑清单
+
+改完代码提交前按顺序跑完四步，全过才算完：
+
+1. **后端全量测试**：`cd backend && ..\.venv\Scripts\python.exe -m pytest -q` —— 必须全绿（含 18% 覆盖率门槛）。
+2. **前端检查**：`cd frontend && npm run lint && npm run build` —— lint 0 errors、build 成功。
+3. **端到端探针**（需先启动后端，脚本用 backend 的 venv Python 在项目根跑）：
+
+   ```powershell
+   .\.venv\Scripts\python.exe scripts\probe_chat.py            # 问 3 题，断言答案带 [参考资料N] 引用
+   .\.venv\Scripts\python.exe scripts\probe_lock_503.py        # 向量库被另一进程占用 → /api/kb/stats 必须 503
+   .\.venv\Scripts\python.exe scripts\probe_ratelimit_429.py   # 连发超额请求 → 必须 429（跑完本机额度约 20 秒恢复）
+   ```
+
+   三个探针退出码 0 = 通过、1 = 失败、2 = 前提不满足（如后端没起）。`probe_lock_503` 会临时在 :8123 起一个后端实例验证锁冲突路径，跑完自动退出。
+4. **SSE 契约自查**：若动了事件流，确认只**新增**事件类型、不改已有事件的字段语义；前端消费链对未知事件类型必须容忍（忽略而不是崩）。
 
 ### CI
 
