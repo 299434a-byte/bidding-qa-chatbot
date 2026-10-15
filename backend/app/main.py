@@ -37,7 +37,7 @@ from . import auth, history as history_store
 from . import ratelimit
 from .agent import MODES, TOOL_NAME, agent_events
 
-from .config import Settings, get_settings
+from .config import ModelOverrideError, Settings, get_settings, resolve_model_settings
 
 from .db import DatabaseUnavailable, discover_schema, list_tables, mysql_connection
 
@@ -93,6 +93,11 @@ logger = get_logger(__name__)
 class ChatRequest(BaseModel):
     question: str = Field(..., min_length=1, description="用户问题")
     top_k: int | None = Field(None, ge=1, le=50, description="最终送入大模型的参考资料条数")
+    model: str | None = Field(
+        None,
+        description="可选：本轮改用的模型。glm-* 切智谱 OpenAI 兼容端点（需配置 ZHIPUAI_API_KEY）；"
+        "留空用 .env 默认。非法值或未配 Key 返回 400，绝不静默回退默认模型",
+    )
 
 
 class IngestRequest(BaseModel):
@@ -120,6 +125,11 @@ class AgentChatRequest(BaseModel):
     )
     mode: Literal["react", "plan", "deep"] = Field(
         "react", description="推理模式：react（现状单轮）/ plan（Plan-and-Solve）/ deep（深度思考 = plan + Reflection）"
+    )
+    model: str | None = Field(
+        None,
+        description="可选：本轮改用的模型。glm-* 切智谱 OpenAI 兼容端点（需配置 ZHIPUAI_API_KEY）；"
+        "留空用 .env 默认。非法值或未配 Key 返回 400，绝不静默回退默认模型",
     )
     conversation_id: str | None = Field(
         None, description="历史会话 id；前端首次提问可不带（后端自动新建并随 conversation 事件返回）"
@@ -833,10 +843,16 @@ def chat(
     user: dict[str, Any] | None = Depends(auth.optional_user),
     _limit: None = Depends(ratelimit.rate_limit),
 ) -> StreamingResponse:
-    s = get_settings()
+    try:
+        # 请求体可选 model 字段：glm-* 切智谱端点；非法值 / 未配 Key 在进 SSE 前 400 拒绝。
+        s = resolve_model_settings(get_settings(), payload.model)
+    except ModelOverrideError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     request_started = time.perf_counter()
     logged_in = bool(user)
-    cacheable = answer_cache.is_cacheable(
+    # 指定模型的请求不吃默认模型的缓存（缓存键不含模型，共用会串答案），也不写入。
+    model_override = bool((payload.model or "").strip())
+    cacheable = (not model_override) and answer_cache.is_cacheable(
         logged_in=logged_in,
         mode="llm",
         has_history=False,
@@ -846,7 +862,8 @@ def chat(
     )
     cached = (
         answer_cache.get_cached(payload.question, s, mode="llm", top_k=payload.top_k)
-        if answer_cache.is_cache_readable(
+        if (not model_override)
+        and answer_cache.is_cache_readable(
             logged_in=logged_in, mode="llm", has_image=False, question=payload.question
         )
         else None
@@ -940,7 +957,11 @@ async def agent_chat(
     _limit: None = Depends(ratelimit.rate_limit),
 ) -> StreamingResponse:
     """Agent 问答：由大模型自主决定是否调用知识库检索工具。"""
-    s = get_settings()
+    try:
+        # 与 /api/chat 同款：glm-* 切智谱端点；非法值 / 未配 Key 在进 SSE 前 400 拒绝。
+        s = resolve_model_settings(get_settings(), payload.model)
+    except ModelOverrideError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     history = [turn.model_dump() for turn in payload.history] if payload.history else None
     mode = payload.mode if payload.mode in MODES else "react"
 
@@ -949,7 +970,9 @@ async def agent_chat(
     request_started = time.perf_counter()
     use_web = s.web_search_default if payload.web_search is None else bool(payload.web_search)
     use_web = bool(use_web and s.web_search_configured)
-    cacheable = answer_cache.is_cacheable(
+    # 指定模型的请求不吃默认模型的缓存（缓存键不含模型，共用会串答案），也不写入。
+    model_override = bool((payload.model or "").strip())
+    cacheable = (not model_override) and answer_cache.is_cacheable(
         logged_in=bool(user),
         mode=mode,
         has_history=bool(history),
@@ -959,7 +982,8 @@ async def agent_chat(
     )
     cached = (
         answer_cache.get_cached(payload.question, s, mode=mode, top_k=payload.top_k)
-        if answer_cache.is_cache_readable(
+        if (not model_override)
+        and answer_cache.is_cache_readable(
             logged_in=bool(user), mode=mode, has_image=False, question=payload.question
         )
         else None

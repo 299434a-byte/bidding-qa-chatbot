@@ -559,11 +559,13 @@ export async function* streamChat(
   question: string,
   topK?: number,
   signal?: AbortSignal,
+  /** 可选：本轮改用的模型（glm-* 切智谱）；后端未配 Key 或名字非法时返回 400，不静默回退 */
+  model?: string,
 ): AsyncGenerator<ChatEvent> {
   const res = await fetch(`${API_BASE}/api/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ question, top_k: topK ?? null }),
+    body: JSON.stringify({ question, top_k: topK ?? null, model: model || null }),
     signal,
   });
   if (!res.ok || !res.body) {
@@ -581,6 +583,8 @@ export async function* streamAgentChat(
   mode?: ChatMode,
   conversationId?: string | null,
   signal?: AbortSignal,
+  /** 可选：本轮改用的模型（glm-* 切智谱）；后端未配 Key 或名字非法时返回 400，不静默回退 */
+  model?: string,
 ): AsyncGenerator<ChatEvent> {
   const headers = new Headers({ "Content-Type": "application/json" });
   // 已登录时带上令牌，后端才会把本轮对话落库
@@ -597,6 +601,7 @@ export async function* streamAgentChat(
       web_search: webSearch ?? null,
       mode: mode ?? "react",
       conversation_id: conversationId ?? null,
+      model: model || null,
     }),
     signal,
   });

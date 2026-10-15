@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import os
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from functools import lru_cache
 
@@ -183,6 +183,7 @@ class Settings:
     graph_schema_ttl: int
 
     zhipuai_api_key: str
+    zhipu_base_url: str
     vision_model: str
     vision_timeout: int
     vision_max_bytes: int
@@ -380,6 +381,7 @@ def _build_settings() -> Settings:
         graph_timeout=_int("GRAPH_TIMEOUT", 45),
         graph_schema_ttl=_int("GRAPH_SCHEMA_TTL", 600),
         zhipuai_api_key=_str("ZHIPUAI_API_KEY"),
+        zhipu_base_url=_str("ZHIPU_BASE_URL", "https://open.bigmodel.cn/api/paas/v4"),
         vision_model=_str("VISION_MODEL", "glm-4.6v-flashx"),
         vision_timeout=_int("VISION_TIMEOUT", 60),
         vision_max_bytes=_int("VISION_MAX_BYTES", 10 * 1024 * 1024),
@@ -419,3 +421,39 @@ def _build_settings() -> Settings:
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return _build_settings()
+
+
+class ModelOverrideError(ValueError):
+    """请求体 model 字段非法或目标供应商未配置（绝不静默回退默认模型）。"""
+
+
+def resolve_model_settings(s: Settings, model: str | None) -> Settings:
+    """把请求体的可选 model 字段解析成本轮生效的 Settings。
+
+    - 未填 / 空串：原样返回（用 .env 默认供应商与模型）；
+    - ``glm-*``：切到智谱 OpenAI 兼容端点（ZHIPU_BASE_URL + ZHIPUAI_API_KEY）；
+      未配 Key 时抛 ModelOverrideError——请求了智谱就绝不静默换回默认供应商；
+    - 其他值：抛 ModelOverrideError（不支持的模型名，不猜测供应商）。
+
+    切换只影响生成模型：llm_model 与 agent_model（留空即跟随 llm_model）；
+    重排 / SQL / 图谱各有独立模型配置，不随请求切换。
+    """
+    name = (model or "").strip()
+    if not name:
+        return s
+    if name.lower().startswith("glm-"):
+        if not s.zhipu_base_url:
+            raise ModelOverrideError("未配置 ZHIPU_BASE_URL，无法使用智谱模型（不会静默回退默认模型）")
+        if not s.zhipuai_api_key:
+            raise ModelOverrideError(
+                f"请求指定了智谱模型「{name}」，但后端未配置 ZHIPUAI_API_KEY，已拒绝切换（不会静默回退默认模型）"
+            )
+        return replace(
+            s,
+            llm_base_url=s.zhipu_base_url,
+            llm_api_key=s.zhipuai_api_key,
+            llm_model=name,
+            llm_model_display=name,
+            agent_model="",
+        )
+    raise ModelOverrideError(f"不支持的模型「{name}」：目前支持留空（.env 默认）或 glm-*（智谱）")
