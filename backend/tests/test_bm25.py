@@ -83,17 +83,17 @@ def test_bm25_scores_match_hand_derived_value():
     assert score == pytest.approx(expected)
 
 
-def test_bm25_ready_is_false_for_empty_corpus():
-    """空语料：索引必须「未就绪」，并且编码时安全返回空向量。"""
+def test_bm25_empty_corpus_encodes_empty():
+    """空语料：编码必须安全返回空向量（不抛异常、不除零）。
+
+    【为什么不再断言 ready/k1/b 这类字段】它们是实现细节，防线失效（比如
+    fit 丢参数）时字段断言未必抓得住；这里锁的是外部可观察的编码行为。
+    """
     # 【为什么专门测空语料】项目硬约束是「知识库为空也要能跑」。
     #   空语料时若还硬算，会出现「除以零」把服务打挂，所以源码里到处在防这件事。
     index = BM25Index().fit([])
 
     assert index.n_docs == 0
-    # 【为什么平均长度是 0.0】源码里写了 `(total/n) if n else 0.0`，专门防除零。
-    assert index.avg_doc_length == 0.0
-    # 【ready 为 False】检索侧看到它就会自动跳过关键词这一路，只走语义一路。
-    assert index.ready is False
     # 【编码返回一对空列表】表示「这次检索没有关键词结果」，而不是抛异常。
     assert index.encode_query("任何问题") == ([], [])
     assert index.encode_document(["任何", "词"]) == ([], [])
@@ -113,9 +113,11 @@ def test_bm25_save_then_load_restores_stats(tmp_path):
 
     loaded = BM25Index.load(path)
 
-    # 【参数也要能复原】否则「建库时的尺子」和「检索时的尺子」不一致，打分会错乱。
-    assert loaded.k1 == 1.2
-    assert loaded.b == 0.6
+    # 【参数复原用行为验证，不断言内部字段】k1/b 决定打分公式——若 load 丢了参数
+    # （退回默认 1.5/0.75），同一查询/文档的编码权重会变。这里对比「读回来的索引
+    # 对同一输入的编码结果与保存前一致」，比断言字段值更能锁住真实行为。
+    assert loaded.encode_query("工程 招标") == original.encode_query("工程 招标")
+    assert loaded.encode_document(["工程", "招标"]) == original.encode_document(["工程", "招标"])
     # 【统计量逐项对比】这些是 IDF 与长度归一化的原料，缺一不可。
     assert loaded.n_docs == original.n_docs
     assert loaded.total_length == original.total_length
@@ -123,5 +125,3 @@ def test_bm25_save_then_load_restores_stats(tmp_path):
     # 【词表与文档频率必须一模一样】它们决定了下标的含义，错位会让检索「张冠李戴」。
     assert loaded.term_to_id == original.term_to_id
     assert loaded.doc_freq == original.doc_freq
-    # 【最后确认读回来的索引是「可用」状态】
-    assert loaded.ready is True

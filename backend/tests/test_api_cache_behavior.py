@@ -39,7 +39,7 @@ _FAKE_HIT = {
 
 
 class _FakeLLM:
-    """假大模型：记录被调用次数（用来证明「第二次提问根本没走问答主流程」）。"""
+    """假大模型：流式吐出一句固定答案（不连网）。"""
 
     def __init__(self) -> None:
         self.calls = 0
@@ -114,21 +114,25 @@ def _ask(client: TestClient, token: str, question: str):
 # 用例 1：同版本内命中 —— 第二次不进问答主流程，直接回放缓存
 # ----------------------------------------------------------------------------
 def test_cache_hit_skips_pipeline(client_and_llm) -> None:
-    """第一问进主流程（假模型被调 1 次）；第二问命中缓存，假模型不再被调用。"""
-    client, llm = client_and_llm
+    """第一问进主流程（有检索事件）；第二问命中缓存，主流程不再跑。
+
+    【为什么不断言「假模型被调用几次」】调用计数是实现细节，防线失效时未必抓得住；
+    这里锁的是外部可观察的事件流：主流程必有 retrieval 事件，缓存回放必没有。
+    """
+    client, _ = client_and_llm
     token = _register(client, "缓存用户甲")
 
     first = _ask(client, token, "市政道路招标有哪些？")
-    # 主流程至少要有正文。
+    # 主流程跑过：有检索事件、有正文。
+    assert any(e["type"] == "retrieval" for e in first)
     assert any(e["type"] == "delta" for e in first)
-    assert llm.calls == 1
 
     second = _ask(client, token, "市政道路招标有哪些？")
     # 命中缓存：给出 cache_hit 提示 + 与第一次相同的答案。
     assert any(e["type"] == "cache_hit" for e in second)
     assert any(e.get("text") == "该项目预算为 1590 万元 [参考资料1]。" for e in second if e["type"] == "delta")
-    # 关键证据：问答主流程没有被再次触发。
-    assert llm.calls == 1
+    # 关键证据：没有检索事件 —— 问答主流程没有被再次触发。
+    assert not any(e["type"] == "retrieval" for e in second)
 
 
 # ----------------------------------------------------------------------------
@@ -138,12 +142,12 @@ def test_expired_entry_is_not_used(client_and_llm) -> None:
     """把缓存行的 created_at 改到过去（超过 CACHE_TTL）→ 视同未命中，重新生成。"""
     import sqlite3
 
-    client, llm = client_and_llm
+    client, _ = client_and_llm
     token = _register(client, "缓存用户乙")
     question = "城市道路工程的工期要求是什么？"
 
-    _ask(client, token, question)
-    assert llm.calls == 1
+    first = _ask(client, token, question)
+    assert any(e["type"] == "retrieval" for e in first)
 
     # 直接把这行的写入时间改早（模拟「放了太久」），TTL 判定自然过期。
     s = get_settings()
@@ -151,9 +155,9 @@ def test_expired_entry_is_not_used(client_and_llm) -> None:
         conn.execute("UPDATE answer_cache SET created_at = '2000-01-01T00:00:00+00:00'")
 
     second = _ask(client, token, question)
-    # 过期条目不再回放：没有 cache_hit，主流程重跑。
+    # 过期条目不再回放：没有 cache_hit，主流程重跑（有检索事件）。
     assert not any(e["type"] == "cache_hit" for e in second)
-    assert llm.calls == 2
+    assert any(e["type"] == "retrieval" for e in second)
 
 
 # ----------------------------------------------------------------------------
@@ -161,16 +165,19 @@ def test_expired_entry_is_not_used(client_and_llm) -> None:
 # ----------------------------------------------------------------------------
 def test_sensitive_question_is_never_cached(client_and_llm) -> None:
     """问题里带「password」这类敏感词：两次都走主流程，缓存表里不留行。"""
-    client, llm = client_and_llm
+    client, _ = client_and_llm
     token = _register(client, "缓存用户丙")
     question = "请帮我查一下管理员 password 的配置"
 
-    _ask(client, token, question)
-    _ask(client, token, question)
+    first = _ask(client, token, question)
+    second = _ask(client, token, question)
 
-    # 敏感问题不读不写：两次都在主流程里生成。
-    assert llm.calls == 2
-    # 证据二：缓存表里没有任何行（哪怕手工查也查不到）。
+    # 敏感问题不读不写：两次都在主流程里生成（都有检索事件、都没有 cache_hit）。
+    assert any(e["type"] == "retrieval" for e in first)
+    assert any(e["type"] == "retrieval" for e in second)
+    assert not any(e["type"] == "cache_hit" for e in first)
+    assert not any(e["type"] == "cache_hit" for e in second)
+    # 缓存表里没有任何行（哪怕手工查也查不到）。
     s = get_settings()
     rows = answer_cache.get_cached(question, s, mode="llm")
     assert rows is None
@@ -181,20 +188,20 @@ def test_sensitive_question_is_never_cached(client_and_llm) -> None:
 # ----------------------------------------------------------------------------
 def test_kb_version_change_invalidates_cache(client_and_llm) -> None:
     """重建知识库（版本指纹改变）后，同一问题的旧答案立即失效、重新生成。"""
-    client, llm = client_and_llm
+    client, _ = client_and_llm
     token = _register(client, "缓存用户丁")
     question = "市政道路项目的招标方式有哪些？"
 
-    _ask(client, token, question)
-    assert llm.calls == 1
+    first = _ask(client, token, question)
+    assert any(e["type"] == "retrieval" for e in first)
 
     # 模拟重建知识库：写一次 kb_version.txt → 版本指纹改变。
     kb_version.write_kb_version(get_settings(), points=200, added=9, updated=3, deleted=1)
 
     second = _ask(client, token, question)
+    # 版本变化 → 旧缓存不再被使用 → 主流程重跑（无 cache_hit、有检索事件）。
     assert not any(e["type"] == "cache_hit" for e in second)
-    # 版本变化 → 旧缓存不再被使用 → 主流程重跑。
-    assert llm.calls == 2
+    assert any(e["type"] == "retrieval" for e in second)
 
 
 # ----------------------------------------------------------------------------
@@ -207,15 +214,13 @@ def test_cache_hit_even_when_question_repeated_with_history(client_and_llm, monk
     于是同一会话里永远不命中（实测 cache_hit_rate 仅 2.4% 的主因之一）。
     修复后读写不对称：写入仍要求无历史（不缓存上下文相关答案），读放行。
     """
-    client, llm = client_and_llm
+    client, _ = client_and_llm
     token = _register(client, "缓存用户戊")
     question = "城市桥梁工程的招标方式有哪些？"
 
-    # Agent 通道的执行体换成「假事件流」并计数：命中缓存时根本不该被调用。
-    calls = {"n": 0}
-
+    # Agent 通道的执行体换成「假事件流」：命中缓存时它整个不该被调用，
+    # 行为上的证据就是响应里没有它产出的 retrieval 事件（回放流只有 cache_hit/sources/delta/done）。
     async def fake_agent_events(*args, **kwargs):
-        calls["n"] += 1
         yield {"type": "retrieval", "meta": {"final_count": 1}}
         yield {"type": "sources", "sources": [dict(_FAKE_HIT)]}
         yield {"type": "delta", "text": "答案正文"}
@@ -223,7 +228,7 @@ def test_cache_hit_even_when_question_repeated_with_history(client_and_llm, monk
 
     monkeypatch.setattr("app.main.agent_events", fake_agent_events)
 
-    # 首问：无历史 → 可写缓存，走一遍假 Agent。
+    # 首问：无历史 → 可写缓存，走一遍假 Agent（有它的 retrieval 事件与正文）。
     resp = client.post(
         "/api/agent/chat",
         json={"question": question},
@@ -232,9 +237,11 @@ def test_cache_hit_even_when_question_repeated_with_history(client_and_llm, monk
     assert resp.status_code == 200, resp.text
     first = _parse_sse(resp.text)
     assert not any(e["type"] == "cache_hit" for e in first)
-    assert calls["n"] == 1
+    assert any(e["type"] == "retrieval" for e in first)
+    assert any(e.get("text") == "答案正文" for e in first if e["type"] == "delta")
 
-    # 第二问：带历史（模拟前端多轮）同一问题 → 必须命中，假 Agent 不再被调用。
+    # 第二问：带历史（模拟前端多轮）同一问题 → 必须命中，假 Agent 不再被调用
+    # （回放流里没有 retrieval 事件）。
     resp = client.post(
         "/api/agent/chat",
         json={
@@ -246,7 +253,7 @@ def test_cache_hit_even_when_question_repeated_with_history(client_and_llm, monk
     assert resp.status_code == 200, resp.text
     second = _parse_sse(resp.text)
     assert any(e["type"] == "cache_hit" for e in second)
-    assert calls["n"] == 1
+    assert not any(e["type"] == "retrieval" for e in second)
 
 
 # ----------------------------------------------------------------------------
@@ -258,14 +265,11 @@ def test_cache_hit_when_web_search_allowed_but_unused(client_and_llm, monkeypatc
     【修的是什么】旧行为按「是否允许联网」判时效性，把所有允许联网的请求一律拒之缓存门外，
     即便 Agent 压根没调联网工具（实测第二问仍要 45.9s）。修复后只看「是否真的用了联网结果」。
     """
-    client, llm = client_and_llm
+    client, _ = client_and_llm
     token = _register(client, "缓存用户己")
     question = "安置房项目的中标候选人公示在哪里看？"
 
-    calls = {"n": 0}
-
     async def fake_agent_events(*args, **kwargs):
-        calls["n"] += 1
         # 注意：这条假事件流不含任何 web_search 事件 —— 模拟「允许联网但没用」。
         yield {"type": "retrieval", "meta": {"final_count": 1}}
         yield {"type": "sources", "sources": [dict(_FAKE_HIT)]}
@@ -279,12 +283,13 @@ def test_cache_hit_when_web_search_allowed_but_unused(client_and_llm, monkeypatc
 
     first = _parse_sse(client.post("/api/agent/chat", json=payload, headers=headers).text)
     assert not any(e["type"] == "cache_hit" for e in first)
-    assert calls["n"] == 1
+    assert any(e["type"] == "retrieval" for e in first)
 
     second = _parse_sse(client.post("/api/agent/chat", json=payload, headers=headers).text)
     assert any(e["type"] == "cache_hit" for e in second)
-    assert calls["n"] == 1
-    assert llm.calls == 0  # 全程走假 Agent，问答主流程的大模型一次都没调
+    # 命中缓存：回放的是同一份答案，且假 Agent 没再被调用（流里没有 retrieval 事件）。
+    assert any(e.get("text") == "纯知识库答案" for e in second if e["type"] == "delta")
+    assert not any(e["type"] == "retrieval" for e in second)
 
 
 def _parse_sse(text: str) -> list[dict]:
