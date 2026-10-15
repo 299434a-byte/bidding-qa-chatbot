@@ -75,7 +75,13 @@ class _FakeEmbedder:
 
 def _patch(monkeypatch: Any, store: _FakeStore, documents: list[Document], token_lists: list[list[str]]) -> None:
     """把 run_incremental 依赖的三个真实入口换成假对象。"""
-    stage = {"tables": {}, "errors": [], "warnings": [], "documents": len(documents)}
+    stage = {
+        "tables": {},
+        "errors": [],
+        "warnings": [],
+        "documents": len(documents),
+        "cleaning": {},
+    }
     monkeypatch.setattr(ingest, "generate_documents", lambda s, p: (documents, token_lists, stage))
     monkeypatch.setattr(ingest, "get_store", lambda s: store)
     monkeypatch.setattr(ingest, "get_embedder", lambda s: _FakeEmbedder())

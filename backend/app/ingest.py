@@ -67,9 +67,17 @@ def generate_documents(
         "errors": [],
         "warnings": [],
         "documents": 0,
+        "cleaning": {},
     }
     documents: list[Document] = []
     token_lists: list[list[str]] = []
+    # 清洗计数跨表累计：跳过/合并不再静默（见 build_documents 的 stats 参数）。
+    cleaning: dict[str, int] = {
+        "missing_primary_key": 0,
+        "duplicate_pk": 0,
+        "empty_text": 0,
+        "truncated_fields": 0,
+    }
 
     if s.kb_source_is_postgres:
         from .pg_source import (
@@ -131,6 +139,7 @@ def generate_documents(
                 label=label,
                 settings=s,
                 primary_key_column=info.get("primary_key"),
+                stats=cleaning,
             ):
                 documents.append(doc)
                 token_lists.append(tokenize(doc.text))
@@ -150,6 +159,16 @@ def generate_documents(
             )
 
     stage_summary["documents"] = len(documents)
+    stage_summary["cleaning"] = dict(cleaning)
+    if any(cleaning.values()):
+        logger.info(
+            "清洗计数：主键缺失 %d 行（已用行号兜底）/ 重复主键 %d 行（保首条跳过）/"
+            " 空文本 %d 行（跳过）/ 字段截断 %d 行",
+            cleaning["missing_primary_key"],
+            cleaning["duplicate_pk"],
+            cleaning["empty_text"],
+            cleaning["truncated_fields"],
+        )
     return documents, token_lists, stage_summary
 
 
@@ -189,6 +208,7 @@ def run_ingest(
     summary["errors"] = _stage["errors"]
     summary["warnings"] = _stage["warnings"]
     summary["documents"] = _stage["documents"]
+    summary["cleaning"] = _stage["cleaning"]
 
     report("bm25", "拟合 BM25 词表与文档频率 …")
     bm25 = BM25Index(k1=s.bm25_k1, b=s.bm25_b).fit(token_lists)
@@ -269,6 +289,7 @@ def run_incremental(
     summary["errors"] = stage["errors"]
     summary["warnings"] = stage["warnings"]
     summary["documents"] = stage["documents"]
+    summary["cleaning"] = stage["cleaning"]
 
     report("bm25", "拟合 BM25（增量：保留旧词表编号）…")
     bm25 = BM25Index(k1=s.bm25_k1, b=s.bm25_b).fit(token_lists)

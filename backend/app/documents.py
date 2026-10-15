@@ -92,15 +92,32 @@ def build_documents(
     label: str,
     settings: Settings,
     primary_key_column: str | None = None,
+    stats: dict[str, int] | None = None,
 ) -> Iterator[Document]:
-    """逐行生成文档（行内容过长时会产生多块）。"""
+    """逐行生成文档（行内容过长时会产生多块）。
+
+    stats 传入时逐类累计清洗计数（跳过/合并不再静默）：
+      missing_primary_key —— 主键缺失，用行号兜底生成 doc_id；
+      duplicate_pk —— 主键重复，保首条、跳过后续（防 doc_id 相撞被静默覆盖）；
+      empty_text —— 渲染后正文为空，跳过；
+      truncated_fields —— 行内有字段超过 _FIELD_TEXT_LIMIT 被截断（按行计）。
+    """
+    counters = stats if stats is not None else {}
+    seen_pks: set[Any] = set()
     for index, row in enumerate(rows):
         pk = row.get(primary_key_column) if primary_key_column else None
         if pk is None or pk == "":
+            counters["missing_primary_key"] = counters.get("missing_primary_key", 0) + 1
             pk = index + 1
+        if pk in seen_pks:
+            # doc_id 形如 表:主键:块号——主键重复会让后写覆盖前写，这里保首条并计数。
+            counters["duplicate_pk"] = counters.get("duplicate_pk", 0) + 1
+            continue
+        seen_pks.add(pk)
 
         body = render_row(row, columns, label, pk)
         if not body.strip():
+            counters["empty_text"] = counters.get("empty_text", 0) + 1
             continue
 
         if len(body) <= settings.max_doc_chars:
@@ -108,6 +125,8 @@ def build_documents(
         else:
             chunks = split_text(body, settings.chunk_size, settings.chunk_overlap)
 
+        if any(isinstance(v, str) and len(v) > _FIELD_TEXT_LIMIT for v in row.values()):
+            counters["truncated_fields"] = counters.get("truncated_fields", 0) + 1
         payload_fields = _truncate_fields(row)
         for i, chunk in enumerate(chunks):
             yield Document(
