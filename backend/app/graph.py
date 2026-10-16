@@ -31,6 +31,10 @@ from .config import Settings, get_settings
 
 from .llm import LLMError, LLMNotConfigured, complete_chat
 
+from .logging_setup import get_logger
+
+_logger = get_logger(__name__)
+
 GRAPH_TOOL_NAME = "query_bidding_graph"
 
 _CELL_TEXT_LIMIT = 300
@@ -62,7 +66,7 @@ class GraphError(RuntimeError):
 def _get_driver(s: Settings):
     """取（并缓存）连接驱动。``connection_timeout`` 限制建连时间；全程只读访问。"""
     try:
-        from neo4j import GraphDatabase, READ_ACCESS
+        from neo4j import GraphDatabase
     except ImportError as exc:  # pragma: no cover
         raise GraphError("缺少依赖 neo4j，请执行 pip install neo4j") from exc
 
@@ -70,10 +74,12 @@ def _get_driver(s: Settings):
     driver = _drivers.get(key)
     if driver is None:
         try:
+            # neo4j 驱动 v6 起 driver() 不再接受 default_access_mode（会抛
+            # ConfigurationError: Unexpected config keys），读写模式改到 session 级
+            # 指定（见 _session）；v4/v5 的 session 同样接受该键，向后兼容。
             driver = GraphDatabase.driver(
                 s.neo4j_uri,
                 auth=(s.neo4j_user, s.neo4j_password),
-                default_access_mode=READ_ACCESS,
                 connection_timeout=max(1, s.neo4j_timeout),
                 max_transaction_retry_time=max(1, s.neo4j_timeout),
             )
@@ -103,15 +109,72 @@ def _query(cypher: str, s: Settings):
 
 
 def _session(s: Settings):
-    return _get_driver(s).session(database=s.neo4j_database or None)
+    from neo4j import READ_ACCESS
+
+    # 读写模式在 session 级指定（驱动 v6 兼容写法）：整个图谱工具只读。
+    return _get_driver(s).session(database=s.neo4j_database or None, default_access_mode=READ_ACCESS)
+
+
+def _is_database_not_found(exc: BaseException) -> bool:
+    """判断异常是否「配置的库名不存在」（Aura 删建实例后实例 ID 变化最容易踩）。
+
+    驱动没有 DatabaseNotFound 专用异常类，只能看错误码：Neo4j 错误带
+    ``code`` / ``neo4j_code`` 属性（Neo.ClientError.Database.DatabaseNotFound），
+    实在拿不到属性就退而看异常文本里有没有标识。
+    """
+    for attr in ("code", "neo4j_code"):
+        value = str(getattr(exc, attr, "") or "")
+        if "DatabaseNotFound" in value:
+            return True
+    return "DatabaseNotFound" in type(exc).__name__ or "does not exist" in str(exc)
+
+
+_db_fallback_warned: set[tuple[str, str]] = set()
+
+
+def _execute(s: Settings, fn: Any) -> Any:
+    """在配置的 NEO4J_DATABASE 上执行 ``fn(session)``；库名不存在时回退默认库重试一次。
+
+    【为什么要有回退】Aura 免费实例删除重建后实例 ID 会变，URI / 用户名 / 库名三处
+    都要跟着改，漏改库名不该让整个图谱工具瘫掉——回退到服务端 home database
+    （session 不传 database），并在日志里打一条 WARNING 提醒改配置。
+    【只回退一次】默认库也不存在时照常抛错，绝不循环重试、绝不吞错。
+    """
+    try:
+        with _session(s) as session:
+            return fn(session)
+    except GraphError:
+        raise
+    except Exception as exc:
+        if not _is_database_not_found(exc):
+            raise
+        key = (s.neo4j_uri, s.neo4j_database)
+        if key not in _db_fallback_warned:
+            _db_fallback_warned.add(key)
+            _logger.warning(
+                "配置的 Neo4j 库名不存在（NEO4J_DATABASE=%s，%s：%s），已回退到默认库（home database）；"
+                "请核对 Aura 实例 ID 并更新 .env",
+                s.neo4j_database,
+                s.neo4j_uri,
+                exc,
+            )
+        from neo4j import READ_ACCESS
+
+        with _get_driver(s).session(default_access_mode=READ_ACCESS) as session:
+            # 不传 database → 服务端 home database；读写模式仍锁死只读
+            return fn(session)
 
 
 def _read_rows(s: Settings, cypher: str) -> list[dict[str, Any]]:
-    """在**只读事务**里执行生成的 Cypher（第 1 层安全边界）。"""
+    """执行模型生成的 Cypher（第 1 层安全边界）。
+
+    驱动 v6 起事务里 ``tx.run`` 不再接受 Query 对象（报「Query object is only
+    supported for session.run」），所以超时挂在 ``session.run(Query)`` 上生效；
+    只读防线由 session 级 ``default_access_mode=READ_ACCESS`` 保证——写语句
+    服务端直接拒绝（配合 validate_cypher 的前置护栏，双层拦截）。
+    """
     try:
-        with _session(s) as session:
-            query = _query(cypher, s)
-            return session.execute_read(lambda tx: tx.run(query).data())
+        return _execute(s, lambda session: session.run(_query(cypher, s)).data())
     except GraphError:
         raise
     except Exception as exc:  # noqa: BLE001 - 统一转成可读提示
@@ -121,8 +184,7 @@ def _read_rows(s: Settings, cypher: str) -> list[dict[str, Any]]:
 def _introspect_rows(s: Settings, cypher: str) -> list[dict[str, Any]]:
     """执行**固定**的结构自省语句（语句由代码写死，不由模型生成）。"""
     try:
-        with _session(s) as session:
-            return session.run(_query(cypher, s)).data()
+        return _execute(s, lambda session: session.run(_query(cypher, s)).data())
     except GraphError:
         raise
     except Exception as exc:  # noqa: BLE001 - 统一转成可读提示

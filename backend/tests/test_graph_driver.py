@@ -2,8 +2,9 @@
 # 文件：tests/test_graph_driver.py —— Neo4j 驱动的「只读模式 / 查询超时 / 关闭钩子」
 #
 # 【这个测试文件整体在测什么】
-#   ① 只读访问模式必须**真的拦住写语句**：假服务端按驱动传入的 default_access_mode
-#      模拟服务端语义，真的执行 CREATE → 抛错。以前只断言「创建时传了 READ 参数」，
+#   ① 只读访问模式必须**真的拦住写语句**：假服务端按 session 级传入的
+#      default_access_mode（驱动 v6 语义）模拟服务端语义，真的执行 CREATE → 抛错。
+#      以前只断言「创建时传了 READ 参数」，
 #      防线失效（忘传参数）时该断言照样绿，只制造安全感——现在改成行为断言；
 #      建连超时（connection_timeout）的生效离线观察不到，验证放在人工验证用例（live）；
 #   ② 查询时长的真正上限是「事务超时」（Query 的 timeout），来自 NEO4J_QUERY_TIMEOUT，
@@ -93,7 +94,11 @@ class _ServerSession:
 
 
 class _ServerDriver:
-    """假 neo4j 服务端：按建连参数模拟连接成败与只读语义。"""
+    """假 neo4j 服务端：按参数模拟连接成败与只读语义。
+
+    访问模式按驱动 v6 语义从 **session 级**取（driver 级传入也兼容）：
+    两处都没传 READ 时模式为 None，写语句会放行 → 行为断言照样能变红。
+    """
 
     def __init__(self, uri: str, default_access_mode: str | None = None, **kwargs) -> None:
         if uri != "bolt://127.0.0.1:7687":
@@ -101,8 +106,8 @@ class _ServerDriver:
             raise ConnectionError(f"无法连接 {uri}：该地址上没有 Neo4j 服务器")
         self._mode = default_access_mode
 
-    def session(self, database=None) -> _ServerSession:
-        return _ServerSession(self._mode)
+    def session(self, database=None, default_access_mode: str | None = None, **kwargs) -> _ServerSession:
+        return _ServerSession(default_access_mode or self._mode)
 
     def close(self) -> None:
         pass

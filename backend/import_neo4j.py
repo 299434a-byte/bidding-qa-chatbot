@@ -1,11 +1,11 @@
 # ============================================================================
-# 文件：import_neo4j.py —— 「远程 MySQL → Neo4j 知识图谱」的建图脚本
+# 文件：import_neo4j.py —— 「业务库 → Neo4j 知识图谱」的建图脚本
 #
 # 【这个脚本是干什么的】
-#   把远程局域网 MySQL（bidding_information_dai 库）的两张业务表：
+#   把业务库（默认本机 PostgreSQL；--source mysql 时为原远程局域网 MySQL）的两张表：
 #     · projects（933 个招标项目）
 #     · procurement_notices（933 条采购公告）
-#   导入到本机 Neo4j 知识图谱，建成「两类节点 + 一类关系」：
+#   导入到 Neo4j 知识图谱（本地或 Aura 云服务，由 .env 的 NEO4J_* 决定），建成「两类节点 + 一类关系」：
 #     · (:Project) 招标项目节点
 #     · (:Notice)  采购公告节点
 #     · (:Project)-[:PUBLISHED]->(:Notice)  项目「发布」了公告
@@ -28,23 +28,27 @@
 #      反复跑这个脚本，不会产生重复节点/重复关系——这叫「幂等」。
 #
 # 【硬性约束】
-#   · 对远程 MySQL 只做 SELECT，绝不写入；
-#   · 连不上 Neo4j 时明确报「服务未启动」，不硬试、不乱猜密码。
+#   · 对源库（PostgreSQL / MySQL）只做 SELECT，绝不写入；
+#   · 连不上 Neo4j 时明确报错，不硬试、不乱猜密码；打印连接信息时密码必须脱敏。
 # ============================================================================
 
-"""把远程 MySQL 的项目/公告导入本机 Neo4j 知识图谱（两类节点 + 一类关系）。
+"""把业务库的项目/公告导入 Neo4j 知识图谱（两类节点 + 一类关系）。
 
 设计要点：
-- **只读源库**：对远程 MySQL 只做 SELECT；
+- **数据源可选**：``--source pg``（默认取 .env 的 KB_SOURCE，当前 postgres）走本机
+  PostgreSQL，复用 ``app.pg_source`` 的只读连接；``--source mysql`` 保持原远程 MySQL 行为不变；
+- **只读源库**：PG 连接带 default_transaction_read_only=on，MySQL 只做 SELECT；
 - **幂等**：全部用 MERGE，重复执行不产生重复数据；
 - **精确匹配**：用 ``project_name`` 把项目和公告连起来；
-- **批量写入**：用 UNWIND + 参数分批提交，稳且快；
-- **连不上就明确报**：先探针检查 7687 端口，不通直接提示「服务未启动」。
+- **批量写入**：用 UNWIND + 参数分批提交，稳且快；读取侧同样按 --batch 分批取回；
+- **连不上就明确报**：本机地址先探针检查 7687 端口；云端（neo4j+s://）跳过探针，
+  交给驱动握手判定。
 
 命令行用法（需在 backend 目录下执行）::
 
-    ..\\.venv\\Scripts\\python.exe import_neo4j.py
-    ..\\.venv\\Scripts\\python.exe import_neo4j.py --batch 500
+    ..\\.venv\\Scripts\\python.exe import_neo4j.py                    # 按 KB_SOURCE（postgres）读本机 PG
+    ..\\.venv\\Scripts\\python.exe import_neo4j.py --source pg --batch 500
+    ..\\.venv\\Scripts\\python.exe import_neo4j.py --source mysql     # 原远程 MySQL 行为，完全不变
 """
 
 # 打开「类型注解延迟求值」开关：让 list[str]、str | None 这类新写法在老版本 Python 也能写。
@@ -70,15 +74,26 @@ from neo4j import GraphDatabase
 
 # 读取项目配置（它就是读 .env 的模块）。源库与图库的连接信息全部来自 .env。
 from app.config import get_settings
+# PG 分支复用 pg_source 的只读连接（default_transaction_read_only=on），不另写一套 psycopg2。
+from app.pg_source import pg_connection
 
 
 # --------------------------------------------------------------------------- #
 # 要从源表读取哪些列（只取建图需要的，避免把无用字段也搬进来）
+# 表名与列名只在下面的常量里出现，调用处一律引用常量，不散落字面量。
 # --------------------------------------------------------------------------- #
+# 两张源表（MySQL 与 PostgreSQL 同名）。
+PROJECT_TABLE = "projects"
+NOTICE_TABLE = "procurement_notices"
 # Project 节点需要的 6 个属性（顺序与下面的 Cypher 一一对应）。
 PROJECT_COLUMNS = ["project_name", "project_id", "budget_amount", "method", "agency", "project_date"]
 # Notice 节点需要的 5 个属性。
 NOTICE_COLUMNS = ["project_name", "title", "purchaser", "procurement_date", "content"]
+
+
+def mask_secret(value: str) -> str:
+    """密码脱敏：任何打印场合都只显示 ****，明文绝不进终端与日志。"""
+    return "****" if value else "(空)"
 
 
 # --------------------------------------------------------------------------- #
@@ -154,6 +169,37 @@ def fetch_rows(conn: pymysql.connections.Connection, table: str, columns: list[s
     with conn.cursor(pymysql.cursors.DictCursor) as cur:
         cur.execute(f"SELECT {cols_sql} FROM `{table}`")
         return list(cur.fetchall())
+
+
+# --------------------------------------------------------------------------- #
+# 从 PostgreSQL 读整张表（只读指定列，按 batch 分批取回）
+# --------------------------------------------------------------------------- #
+def fetch_rows_pg(table: str, columns: list[str], batch: int) -> list[dict[str, Any]]:
+    """用 pg_source 的只读连接读源表指定列，每 batch 行一批取回，返回字典列表。
+
+    【为什么复用 pg_connection 而不是自己 psycopg2.connect】
+        pg_connection 内置 default_transaction_read_only=on（源库绝不被写）与
+        连接失败的统一翻译，一行连接代码都不重复造。
+    【为什么列名走常量白名单】SELECT 只拼脚本内写死的列清单（PROJECT_COLUMNS /
+        NOTICE_COLUMNS），列名不是占位符参数，但因为来源是常量，同样无注入风险。
+    【为什么不直接用 pg_source.iter_rows】iter_rows 会把 None 归一成 ""（JSON 场景），
+        而建图要求「None 保持 None」（空值不设节点属性），所以这里取原始值，
+        交给与 MySQL 分支共用的 _to_float / _to_iso 统一归一化。
+    """
+    # 双引号是 PG 的标识符引用；columns 来自常量清单，无注入风险。
+    cols_sql = ", ".join('"' + c.replace('"', '""') + '"' for c in columns)
+    table_sql = '"' + table.replace('"', '""') + '"'
+    rows: list[dict[str, Any]] = []
+    with pg_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT {cols_sql} FROM {table_sql}")
+            names = [d.name for d in (cur.description or [])]
+            while True:
+                chunk = cur.fetchmany(batch)
+                if not chunk:
+                    break
+                rows.extend(dict(zip(names, record)) for record in chunk)
+    return rows
 
 
 # --------------------------------------------------------------------------- #
@@ -256,71 +302,114 @@ def link_published(session: Any) -> int:
 # --------------------------------------------------------------------------- #
 def main() -> int:
     """脚本入口：探针 → 连两库 → 建节点 → 建关系 → 打印报告。返回退出码（0 成功 / 1 失败）。"""
-    parser = argparse.ArgumentParser(description="把远程 MySQL 的项目/公告导入本机 Neo4j 知识图谱")
-    parser.add_argument("--batch", type=int, default=500, help="每批写入行数（默认 500）")
+    parser = argparse.ArgumentParser(description="把业务库（PG/MySQL）的项目/公告导入 Neo4j 知识图谱")
+    parser.add_argument("--batch", type=int, default=500, help="每批读/写行数（默认 500）")
+    parser.add_argument(
+        "--source",
+        choices=["pg", "mysql"],
+        default=None,
+        help="数据源：pg=本机 PostgreSQL；mysql=原远程 MySQL（缺省按 .env 的 KB_SOURCE）",
+    )
     args = parser.parse_args()
 
     # 全部连接信息来自 .env。
     s = get_settings()
+    # 缺省跟随 KB_SOURCE：postgres → pg，否则 mysql（--source 显式指定时以参数为准）。
+    source = args.source or ("pg" if s.kb_source_is_postgres else "mysql")
 
     print("=" * 70)
-    print("MySQL → Neo4j 建图")
-    print(f"  源（MySQL）：{s.mysql_host}:{s.mysql_port}/{s.mysql_database}（只读）")
-    print(f"  目标（Neo4j）：{s.neo4j_uri}（库 {s.neo4j_database}）")
+    print(f"{'PostgreSQL' if source == 'pg' else 'MySQL'} → Neo4j 建图")
+    if source == "pg":
+        print(f"  源（PostgreSQL）：{s.pg_host}:{s.pg_port}/{s.pg_database}（只读）")
+    else:
+        print(f"  源（MySQL）：{s.mysql_host}:{s.mysql_port}/{s.mysql_database}（只读）")
+    # 密码一律脱敏，明文绝不进终端与日志。
+    print(f"  目标（Neo4j）：{s.neo4j_uri}（库 {s.neo4j_database}，用户 {s.neo4j_user}，密码 {mask_secret(s.neo4j_password)}）")
     print(f"  批大小：{args.batch} 行/批")
     print("=" * 70)
 
-    # ——— 第 0 步：探针检查 Neo4j 端口，不通就明确报「服务未启动」，直接退出 ———
-    alive, host, port = neo4j_port_open(s.neo4j_uri)
-    if not alive:
-        print(f"[错误] Neo4j 服务未启动：{host}:{port} 端口连不上（{s.neo4j_uri}）。")
-        print("       人话解释：图数据库没有在运行，脚本不会硬试。请先启动 Neo4j 再重跑本脚本。")
-        return 1
+    # ——— 第 0 步：本机地址先探针检查端口；云端（neo4j+s:// 等）跳过，交给驱动握手 ———
+    uri_host = urlparse(s.neo4j_uri).hostname or ""
+    if uri_host in ("127.0.0.1", "localhost", "::1"):
+        alive, host, port = neo4j_port_open(s.neo4j_uri)
+        if not alive:
+            print(f"[错误] Neo4j 服务未启动：{host}:{port} 端口连不上（{s.neo4j_uri}）。")
+            print("       人话解释：图数据库没有在运行，脚本不会硬试。请先启动 Neo4j 再重跑本脚本。")
+            return 1
+    else:
+        print(f"[提示] 目标是云端地址（{uri_host}），跳过本地端口探针，交给驱动握手判定。")
 
-    # ——— 第 1 步：连源 MySQL（只读）———
+    # ——— 第 1 步：连源 MySQL（仅 --source mysql；只读）———
+    # PG 分支不在此预连：fetch_rows_pg 内部走 pg_source.pg_connection（同样只读）。
+    src = None
+    if source == "mysql":
+        try:
+            src = pymysql.connect(
+                host=s.mysql_host,
+                port=s.mysql_port,
+                user=s.mysql_user,
+                password=s.mysql_password,
+                database=s.mysql_database,
+                charset=s.mysql_charset,
+                connect_timeout=10,
+            )
+        except Exception as exc:  # noqa: BLE001 - 接住连接失败并翻译成人话
+            print(f"[错误] 连不上源 MySQL（{s.mysql_host}:{s.mysql_port}/{s.mysql_database}）：{exc}")
+            print("       人话解释：请检查 .env 的 MYSQL_* 配置，以及能否访问该局域网地址。")
+            return 1
+
+    # ——— 第 2 步：连 Neo4j。本机已探端口；云端直连。账号密码不对时在这里握手报错 ———
     try:
-        src = pymysql.connect(
-            host=s.mysql_host,
-            port=s.mysql_port,
-            user=s.mysql_user,
-            password=s.mysql_password,
-            database=s.mysql_database,
-            charset=s.mysql_charset,
-            connect_timeout=10,
+        driver = GraphDatabase.driver(
+            s.neo4j_uri,
+            auth=(s.neo4j_user, s.neo4j_password),
+            connection_timeout=s.neo4j_timeout,
         )
-    except Exception as exc:  # noqa: BLE001 - 接住连接失败并翻译成人话
-        print(f"[错误] 连不上源 MySQL（{s.mysql_host}:{s.mysql_port}/{s.mysql_database}）：{exc}")
-        print("       人话解释：请检查 .env 的 MYSQL_* 配置，以及能否访问该局域网地址。")
-        return 1
-
-    # ——— 第 2 步：连 Neo4j。端口虽通，但账号密码可能不对，这里再握手一次 ———
-    try:
-        driver = GraphDatabase.driver(s.neo4j_uri, auth=(s.neo4j_user, s.neo4j_password))
         driver.verify_connectivity()
     except Exception as exc:  # noqa: BLE001
-        src.close()
-        print(f"[错误] Neo4j 连接失败（{s.neo4j_uri}）：{exc}")
-        print("       人话解释：端口是通的，但握手/认证没通过——多半是 NEO4J_USER / NEO4J_PASSWORD 不对。")
-        print("                 请核对 .env 里的这两个值是否与图库一致。")
+        if src is not None:
+            src.close()
+        print(f"[错误] Neo4j 连接失败（{s.neo4j_uri}，用户 {s.neo4j_user}，密码 {mask_secret(s.neo4j_password)}）：{exc}")
+        print("       人话解释：握手/认证没通过——多半是 NEO4J_USER / NEO4J_PASSWORD 不对（Aura 的用户名是实例 ID），")
+        print("                 或实例被闲置暂停（去 console.neo4j.io 点 Resume），或本机代理拦截了域名解析。")
         return 1
+
+    # 打印服务端版本（本地/Aura 通用），读不到不影响导入。
+    try:
+        with driver.session(database=s.neo4j_database) as version_session:
+            comps = version_session.run(
+                "CALL dbms.components() YIELD versions, edition RETURN versions, edition LIMIT 1"
+            ).data()
+        if comps:
+            print(f"  服务端版本：{comps[0].get('versions')}（{comps[0].get('edition')}）")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[提示] 读取服务端版本失败（不影响导入）：{exc}")
 
     # ——— 第 3 步：读源数据（读成字典列表）———
     started = time.time()
-    print("\n[读取] 从 MySQL 取 projects 与 procurement_notices ...")
+    print(f"\n[读取] 从 {'PostgreSQL' if source == 'pg' else 'MySQL'} 取 {PROJECT_TABLE} 与 {NOTICE_TABLE} ...")
     try:
-        project_rows = fetch_rows(src, "projects", PROJECT_COLUMNS)
-        notice_rows = fetch_rows(src, "procurement_notices", NOTICE_COLUMNS)
+        if source == "pg":
+            project_rows = fetch_rows_pg(PROJECT_TABLE, PROJECT_COLUMNS, args.batch)
+            notice_rows = fetch_rows_pg(NOTICE_TABLE, NOTICE_COLUMNS, args.batch)
+        else:
+            assert src is not None  # mysql 分支上面已连上
+            project_rows = fetch_rows(src, PROJECT_TABLE, PROJECT_COLUMNS)
+            notice_rows = fetch_rows(src, NOTICE_TABLE, NOTICE_COLUMNS)
     except Exception as exc:  # noqa: BLE001
         driver.close()
-        src.close()
+        if src is not None:
+            src.close()
         print(f"[错误] 读取源表失败：{exc}")
-        print("       人话解释：多半是表名/列名不对，或该账号没有这两张表的读取权限。")
+        print("       人话解释：多半是表名/列名不对、账号没有这两张表的读取权限，或源库连不上。")
         return 1
     finally:
-        # 源库用完了就关掉，及时释放连接。
-        src.close()
+        # 源库用完了就关掉，及时释放连接（PG 分支 src 为 None，无需处理）。
+        if src is not None:
+            src.close()
 
-    # 把 MySQL 的值翻译成 Neo4j 能存的样子（decimal→float、date→ISO 字符串）。
+    # 把源库的值翻译成 Neo4j 能存的样子（Decimal→float、日期→ISO 字符串、None 保持 None）。
+    # PG 返回原始 Decimal/date 对象，MySQL 返回 pymysql 的 Decimal/date —— 同一套归一化通吃。
     for r in project_rows:
         r["budget_amount"] = _to_float(r.get("budget_amount"))
         r["project_date"] = _to_iso(r.get("project_date"))
@@ -345,16 +434,18 @@ def main() -> int:
             before = session.run("MATCH (p:Project) RETURN count(p) AS c").single()["c"]
             load_projects(session, project_rows, args.batch)
             after = session.run("MATCH (p:Project) RETURN count(p) AS c").single()["c"]
-            created_nodes += after - before
-            print(f"       :Project 节点共 {after} 个（本次新建 {after - before} 个）")
+            proj_created = after - before
+            created_nodes += proj_created
+            print(f"       :Project 节点共 {after} 个（本次写入 {proj_created} 个，复用 {after - proj_created} 个）")
 
             # 4.3 写 Notice 节点。
             print("[建图] 写入 :Notice 节点 ...")
             before = session.run("MATCH (n:Notice) RETURN count(n) AS c").single()["c"]
             load_notices(session, notice_rows, args.batch)
             after = session.run("MATCH (n:Notice) RETURN count(n) AS c").single()["c"]
-            created_nodes += after - before
-            print(f"       :Notice 节点共 {after} 个（本次新建 {after - before} 个）")
+            notice_created = after - before
+            created_nodes += notice_created
+            print(f"       :Notice 节点共 {after} 个（本次写入 {notice_created} 个，复用 {after - notice_created} 个）")
 
             # 4.4 建「项目发布公告」关系。
             print("[建图] 创建 (:Project)-[:PUBLISHED]->(:Notice) 关系 ...")
@@ -374,21 +465,24 @@ def main() -> int:
 
     elapsed = round(time.time() - started, 2)
 
-    # ——— 第 5 步：打印结果报告 ———
+    # ——— 第 5 步：打印结果报告（写入/复用口径：本次新建 vs 已存在复用）———
     print("\n" + "=" * 70)
     print("建图结果汇总")
     print("=" * 70)
-    print(f"  :Project 节点数            {n_proj}")
-    print(f"  :Notice  节点数            {n_notice}")
-    print(f"  (:Project)-[:PUBLISHED]->(:Notice) 关系数  {n_rel}")
-    print(f"  本次新建：节点 {created_nodes} 个，关系 {created_rels} 条")
+    print(f"  :Project 节点数            {n_proj}（写入 {proj_created}，复用 {n_proj - proj_created}）")
+    print(f"  :Notice  节点数            {n_notice}（写入 {notice_created}，复用 {n_notice - notice_created}）")
+    print(f"  (:Project)-[:PUBLISHED]->(:Notice) 关系数  {n_rel}（写入 {created_rels}，复用 {n_rel - created_rels}）")
+    print(f"  本次写入：节点 {created_nodes} 个，关系 {created_rels} 条")
+    print(f"  源表读取：{PROJECT_TABLE} {len(project_rows)} 行，{NOTICE_TABLE} {len(notice_rows)} 行")
     print(f"  总耗时：{elapsed} 秒")
     print("-" * 70)
+    # 自检断言：关系数必须 ≥ 900（两表以 project_name 关联，933 行对 933 行应全部连上）。
     if n_rel >= 900:
         print("  结论：关系数已达 900+，建图成功。")
-    else:
-        print(f"  结论：关系数 {n_rel} 少于 900，请检查两张表的 project_name 是否能对应上。")
-    return 0
+        return 0
+    print(f"  结论：关系数 {n_rel} 少于 900——两张表的 project_name 没有对应上，或源表行数不对。")
+    print(f"        请检查：{PROJECT_TABLE} 与 {NOTICE_TABLE} 读到的行数是否为预期的 933/933。")
+    return 1
 
 
 # 【启动守卫】只有「直接运行本文件」时才执行 main()；被别的脚本 import 时不会自动跑。
