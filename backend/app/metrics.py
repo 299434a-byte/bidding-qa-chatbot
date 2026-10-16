@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -44,6 +45,24 @@ CREATE TABLE IF NOT EXISTS qa_event_counters (
     hits INTEGER NOT NULL DEFAULT 0
 );
 """
+
+# 深度模式「预算四本账」消耗表：一次深度问答记一条（工具/检索/LLM 次数 + 耗时 + 超限项）。
+# 与 qa_metrics 分开：只有 deep/plan 模式记账，普通问答不掺水平均值。
+_BUDGET_DDL = """
+CREATE TABLE IF NOT EXISTS qa_budget_metrics (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    mode        TEXT NOT NULL DEFAULT 'deep',
+    tool_calls  INTEGER NOT NULL DEFAULT 0,
+    retrievals  INTEGER NOT NULL DEFAULT 0,
+    llm_calls   INTEGER NOT NULL DEFAULT 0,
+    elapsed_ms  REAL NOT NULL DEFAULT 0,
+    exceeded    TEXT NOT NULL DEFAULT '[]',
+    created_at  TEXT NOT NULL
+);
+"""
+
+# summary.budget.exceeded 里输出的账本名（与 deep_agent._Budget 的 exceeded 键同名）。
+BUDGET_ACCOUNTS = ("tool_calls", "retrievals", "llm_calls", "time_seconds")
 
 # summary 里输出的事件计数名（顶层字段与 key 同名）。
 COUNTER_NAMES = ("forced_finalize", "coverage_refused", "coverage_pass", "no_gain_stop", "followup_reused")
@@ -77,6 +96,7 @@ def _ensure_schema(conn: sqlite3.Connection, path: Path) -> None:
             return
         conn.execute(_DDL)
         conn.execute(_COUNTER_DDL)
+        conn.execute(_BUDGET_DDL)
         try:
             conn.execute(
                 "ALTER TABLE qa_metrics ADD COLUMN rerank_failed INTEGER NOT NULL DEFAULT 0"
@@ -138,6 +158,41 @@ def record(
         return False
 
 
+def record_budget(
+    *,
+    mode: str,
+    tool_calls: int,
+    retrievals: int,
+    llm_calls: int,
+    elapsed_ms: float,
+    exceeded: list[str] | tuple[str, ...] = (),
+    settings: Settings | None = None,
+) -> bool:
+    """记一条深度模式预算消耗。成功返回 ``True``；任何失败静默返回 ``False``。"""
+    s = settings or get_settings()
+    try:
+        with _connect(s) as conn:
+            _ensure_schema(conn, s.metrics_db_path)
+            conn.execute(
+                "INSERT INTO qa_budget_metrics "
+                "(mode, tool_calls, retrievals, llm_calls, elapsed_ms, exceeded, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    mode or "deep",
+                    max(0, int(tool_calls or 0)),
+                    max(0, int(retrievals or 0)),
+                    max(0, int(llm_calls or 0)),
+                    max(0.0, float(elapsed_ms or 0.0)),
+                    json.dumps(list(exceeded or []), ensure_ascii=False),
+                    _now_iso(),
+                ),
+            )
+            conn.commit()
+        return True
+    except Exception:
+        return False
+
+
 def bump(name: str, *, settings: Settings | None = None) -> bool:
     """事件计数 +1（如 forced_finalize）。成功返回 ``True``；任何失败静默返回 ``False``。"""
     if name not in COUNTER_NAMES:
@@ -160,6 +215,14 @@ def bump(name: str, *, settings: Settings | None = None) -> bool:
 def summary(settings: Settings | None = None) -> dict[str, Any]:
     """汇总指标，返回一个字典（全部失败时返回「空统计」，而不是抛异常）。"""
     s = settings or get_settings()
+    empty_budget: dict[str, Any] = {
+        "samples": 0,
+        "avg_tool_calls": 0.0,
+        "avg_retrievals": 0.0,
+        "avg_llm_calls": 0.0,
+        "avg_elapsed_ms": 0.0,
+        "exceeded": {name: 0 for name in BUDGET_ACCOUNTS},
+    }
     empty: dict[str, Any] = {
         "total": 0,
         "avg_elapsed_ms": 0.0,
@@ -177,6 +240,7 @@ def summary(settings: Settings | None = None) -> dict[str, Any]:
         "coverage_pass": 0,
         "no_gain_stop": 0,
         "followup_reused": 0,
+        "budget": empty_budget,
     }
     try:
         with _connect(s) as conn:
@@ -198,6 +262,17 @@ def summary(settings: Settings | None = None) -> dict[str, Any]:
             counter_rows = conn.execute(
                 "SELECT name, hits FROM qa_event_counters"
             ).fetchall()
+            budget_row = conn.execute(
+                "SELECT COUNT(*) AS samples, "
+                "COALESCE(AVG(tool_calls), 0) AS avg_tools, "
+                "COALESCE(AVG(retrievals), 0) AS avg_retrievals, "
+                "COALESCE(AVG(llm_calls), 0) AS avg_llms, "
+                "COALESCE(AVG(elapsed_ms), 0) AS avg_elapsed "
+                "FROM qa_budget_metrics"
+            ).fetchone()
+            budget_exceeded_rows = conn.execute(
+                "SELECT exceeded, COUNT(*) AS cnt FROM qa_budget_metrics GROUP BY exceeded"
+            ).fetchall()
         total = int(row["total"] or 0)
         mode_distribution = {str(r["mode"]): int(r["cnt"]) for r in mode_rows}
         hits = int(row["hits"] or 0)
@@ -208,6 +283,24 @@ def summary(settings: Settings | None = None) -> dict[str, Any]:
         attempted = reranks + rerank_fails
         rerank_success_rate = round(reranks / attempted, 4) if attempted else 0.0
         counters = {str(r["name"]): int(r["hits"] or 0) for r in counter_rows}
+        budget_samples = int(budget_row["samples"] or 0)
+        exceeded_counts = {name: 0 for name in BUDGET_ACCOUNTS}
+        for r in budget_exceeded_rows:
+            try:
+                names = json.loads(r["exceeded"] or "[]")
+            except Exception:
+                names = []
+            for name in names:
+                if name in exceeded_counts:
+                    exceeded_counts[name] += int(r["cnt"] or 0)
+        budget = {
+            "samples": budget_samples,
+            "avg_tool_calls": round(float(budget_row["avg_tools"] or 0.0), 2),
+            "avg_retrievals": round(float(budget_row["avg_retrievals"] or 0.0), 2),
+            "avg_llm_calls": round(float(budget_row["avg_llms"] or 0.0), 2),
+            "avg_elapsed_ms": round(float(budget_row["avg_elapsed"] or 0.0), 1),
+            "exceeded": exceeded_counts,
+        }
         return {
             "total": total,
             "avg_elapsed_ms": round(float(row["avg_elapsed"] or 0.0), 1),
@@ -225,6 +318,7 @@ def summary(settings: Settings | None = None) -> dict[str, Any]:
             "coverage_pass": counters.get("coverage_pass", 0),
             "no_gain_stop": counters.get("no_gain_stop", 0),
             "followup_reused": counters.get("followup_reused", 0),
+            "budget": budget,
         }
     except Exception:
         return empty

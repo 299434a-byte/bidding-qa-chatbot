@@ -225,6 +225,9 @@ class Settings:
     deep_max_tokens: int
     deep_timeout: int
     deep_observation_chars: int
+    deep_tool_call_limit: int
+    deep_retrieval_limit: int
+    deep_llm_call_limit: int
 
     @property
     def llm_configured(self) -> bool:
@@ -417,6 +420,9 @@ def _build_settings() -> Settings:
         deep_max_tokens=_int("DEEP_MAX_TOKENS", 3072),
         deep_timeout=_int("DEEP_TIMEOUT", 120),
         deep_observation_chars=_int("DEEP_OBSERVATION_CHARS", 1200),
+        deep_tool_call_limit=_int("DEEP_TOOL_CALL_LIMIT", 12),
+        deep_retrieval_limit=_int("DEEP_RETRIEVAL_LIMIT", 8),
+        deep_llm_call_limit=_int("DEEP_LLM_CALL_LIMIT", 10),
     )
 
 

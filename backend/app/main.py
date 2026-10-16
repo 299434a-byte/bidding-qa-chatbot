@@ -383,6 +383,9 @@ def read_config(user: dict[str, Any] = Depends(auth.current_user)) -> dict[str, 
                 "max_tokens": s.deep_max_tokens,
                 "timeout": s.deep_timeout,
                 "observation_chars": s.deep_observation_chars,
+                "tool_call_limit": s.deep_tool_call_limit,
+                "retrieval_limit": s.deep_retrieval_limit,
+                "llm_call_limit": s.deep_llm_call_limit,
             },
             "tools": [TOOL_NAME]
             + ([PG_TOOL_NAME] if s.pg_configured else [])

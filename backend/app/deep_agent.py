@@ -4,9 +4,10 @@
 职责：
   - 先让模型产出执行计划，再逐步执行并收集证据
   - 每步后做反思（Reflection），判断证据是否充分、是否继续
+  - 预算四本账（工具 / 检索 / LLM / 时间）：任何一本超限都立即收敛到已有证据作答
   - 以与 react 模式同构的事件流对外暴露
 
-依赖：agent、rag、rerank、llm、config
+依赖：agent、rag、rerank、llm、config、metrics
 被谁调用：agent（/api/agent/chat 的 deep 模式分发）
 """
 
@@ -23,6 +24,7 @@ from langchain_core.messages import HumanMessage
 from . import metrics as metrics_store
 
 from .agent import (
+    TOOL_NAME,
     _build_agent,
     _citation_check,
     _new_states,
@@ -61,6 +63,77 @@ _REFLECT_SYSTEM_PROMPT = (
     '{"verdict": "revise", "issues": ["问题1", "问题2"]}\n'
     "若答案已足够好就输出 ok（issues 可为空）；只有确实需要改动时才输出 revise。"
 )
+
+
+class _Budget:
+    """深度模式的预算四本账：工具调用 / 检索 / 大模型调用 / 整体时间。
+
+    任何一本账超限都立即收敛到已有证据作答 —— 不抛异常、不空手结束。
+    次数类上限 ``<=0`` 表示该本账不限；时间账复用 DEEP_TIMEOUT。
+    """
+
+    _NAMES = {
+        "tool_calls": "工具调用",
+        "retrievals": "检索",
+        "llm_calls": "大模型调用",
+        "time_seconds": "时间",
+    }
+
+    def __init__(self, s: Settings, started: float) -> None:
+        self.tool_calls = 0
+        self.retrievals = 0
+        self.llm_calls = 0
+        self.started = started
+        self.tool_call_limit = int(s.deep_tool_call_limit)
+        self.retrieval_limit = int(s.deep_retrieval_limit)
+        self.llm_call_limit = int(s.deep_llm_call_limit)
+        self.time_limit = int(s.deep_timeout)
+
+    def count_tool(self, *, retrieval: bool = False) -> None:
+        self.tool_calls += 1
+        if retrieval:
+            self.retrievals += 1
+
+    def count_llm(self) -> None:
+        self.llm_calls += 1
+
+    @property
+    def elapsed_seconds(self) -> float:
+        return time.monotonic() - self.started
+
+    def exceeded(self) -> list[str]:
+        """已超限的账本名列表（空 = 四本账都还有余量）。"""
+        out: list[str] = []
+        if self.tool_call_limit > 0 and self.tool_calls > self.tool_call_limit:
+            out.append("tool_calls")
+        if self.retrieval_limit > 0 and self.retrievals > self.retrieval_limit:
+            out.append("retrievals")
+        if self.llm_call_limit > 0 and self.llm_calls > self.llm_call_limit:
+            out.append("llm_calls")
+        if self.time_limit > 0 and self.elapsed_seconds > self.time_limit:
+            out.append("time_seconds")
+        return out
+
+    def over_budget(self) -> bool:
+        return bool(self.exceeded())
+
+    def reason_text(self) -> str:
+        exceeded = self.exceeded()
+        return "、".join(f"{self._NAMES.get(n, n)}预算已超限" for n in exceeded) or "预算未超限"
+
+    def meta(self) -> dict[str, Any]:
+        """四本账的实际消耗与上限（写进 done 事件的 meta，前端可观测）。"""
+        return {
+            "tool_calls": self.tool_calls,
+            "tool_call_limit": self.tool_call_limit,
+            "retrievals": self.retrievals,
+            "retrieval_limit": self.retrieval_limit,
+            "llm_calls": self.llm_calls,
+            "llm_call_limit": self.llm_call_limit,
+            "elapsed_seconds": round(self.elapsed_seconds, 2),
+            "time_limit": self.time_limit,
+            "exceeded": self.exceeded(),
+        }
 
 
 def _dedupe_sources(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -222,14 +295,41 @@ async def run_deep_events(
     mode: str = "plan",
     web_search: bool | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
-    """Plan-and-Solve（+ Reflection）事件流。"""
+    """Plan-and-Solve（+ Reflection）事件流。
+
+    外层只负责一件事：无论正常收口还是中途断开，都把本轮「预算四本账」消耗记进 metrics。
+    """
     s = settings or get_settings()
-    mode = "deep" if mode == "deep" else "plan"
     done_mode = "agent_deep" if mode == "deep" else "agent_plan"
     started = time.monotonic()
+    budget = _Budget(s, started)
+    try:
+        async for event in _stream_deep_events(question, s, final_k, mode, web_search, budget):
+            yield event
+    finally:
+        metrics_store.record_budget(
+            mode=done_mode,
+            tool_calls=budget.tool_calls,
+            retrievals=budget.retrievals,
+            llm_calls=budget.llm_calls,
+            elapsed_ms=budget.elapsed_seconds * 1000,
+            exceeded=budget.exceeded(),
+            settings=s,
+        )
 
-    def over_budget() -> bool:
-        return s.deep_timeout > 0 and (time.monotonic() - started) > s.deep_timeout
+
+async def _stream_deep_events(
+    question: str,
+    s: Settings,
+    final_k: int | None,
+    mode: str,
+    web_search: bool | None,
+    budget: _Budget,
+) -> AsyncIterator[dict[str, Any]]:
+    """Plan-and-Solve（+ Reflection）事件流本体（预算记账由 run_deep_events 外层收口）。"""
+    mode = "deep" if mode == "deep" else "plan"
+    done_mode = "agent_deep" if mode == "deep" else "agent_plan"
+    over_budget = budget.over_budget
 
     use_web = s.web_search_default if web_search is None else bool(web_search)
     use_web = bool(use_web and s.web_search_configured)
@@ -237,6 +337,7 @@ async def run_deep_events(
     steps: list[dict[str, str]] = [{"title": "直接作答", "detail": question}]
     plan_fallback = True
     try:
+        budget.count_llm()
         raw_plan = await asyncio.to_thread(
             complete_chat,
             _plan_messages(question, s),
@@ -274,7 +375,7 @@ async def run_deep_events(
         agent = _build_agent(s, web_search_enabled=use_web)
     except Exception as exc:  # noqa: BLE001
         yield {"type": "error", "message": f"深度模式初始化失败：{exc}"}
-        yield {"type": "done", "mode": "agent_failed"}
+        yield {"type": "done", "mode": "agent_failed", "budget": budget.meta()}
         return
 
     for i, step in enumerate(steps, start=1):
@@ -294,14 +395,15 @@ async def run_deep_events(
                 "title": step["title"],
                 "status": "failed",
                 "observation": None,
-                "error": f"总时限 {s.deep_timeout}s 已到，跳过该步骤",
+                "error": f"{budget.reason_text()}，跳过该步骤",
             }
-            observations.append("（该步骤因超时被跳过）")
+            observations.append(f"（该步骤因{budget.reason_text()}被跳过）")
             continue
 
         turn = _new_turn_state()
         parts: list[str] = []
         step_error: str | None = None
+        budget.count_llm()
         try:
             async for event in _stream_react_turn(
                 agent,
@@ -314,10 +416,15 @@ async def run_deep_events(
                 emit_delta=False,
             ):
                 etype = event.get("type")
+                if etype == "tool_call":
+                    budget.count_tool(retrieval=(event.get("name") == TOOL_NAME))
                 if etype == "step_text":
                     parts.append(str(event.get("text") or ""))
                 elif etype in ("tool_call", "tool_result", "sql_query", "graph_query", "web_search", "thinking"):
                     yield event
+                if budget.over_budget():
+                    # 任一账本超限：本步立即收手（已有 observation 照常进结论），后续步骤不再起跑。
+                    break
         except Exception as exc:  # noqa: BLE001 - 单步失败只标记该步，不中断整轮
             step_error = str(exc)
 
@@ -368,12 +475,18 @@ async def run_deep_events(
         yield {"type": "retrieval", "meta": _merge_meta(metas, len(sources), s)}
         yield {"type": "sources", "sources": sources}
         yield {"type": "delta", "text": _fallback_answer(sources), "channel": "answer"}
-        yield {"type": "done", "mode": done_mode, "reason": "no_gain"}
+        yield {"type": "done", "mode": done_mode, "reason": "no_gain", "budget": budget.meta()}
         return
 
     sources = _dedupe_sources(collected)
     yield {"type": "retrieval", "meta": _merge_meta(metas, len(sources), s)}
     yield {"type": "sources", "sources": sources}
+
+    if over_budget():
+        # 任一账本超限：不再进综合生成，立即以已有证据收敛作答（不抛异常、不空手结束）。
+        yield {"type": "delta", "text": _fallback_answer(sources), "channel": "answer"}
+        yield {"type": "done", "mode": done_mode, "reason": "budget", "budget": budget.meta()}
+        return
 
     answer_parts: list[str] = []
     # 思维链缓冲：综合阶段的 reasoning 增量转成独立 thinking 事件（不混进正文）。
@@ -387,6 +500,7 @@ async def run_deep_events(
             yield {"type": "thinking", "delta": thinking_parts.pop(0)}
 
     try:
+        budget.count_llm()
         async for piece in astream_chat(
             _solve_messages(question, steps, observations, sources),
             s,
@@ -422,6 +536,7 @@ async def run_deep_events(
             if over_budget():
                 break
             try:
+                budget.count_llm()
                 raw = await asyncio.to_thread(
                     complete_chat,
                     _reflect_messages(question, current, observations, sources),
@@ -453,6 +568,7 @@ async def run_deep_events(
                 revision_thinking.append(text)
 
             try:
+                budget.count_llm()
                 async for piece in astream_chat(
                     _solve_messages(question, steps, observations, sources)
                     + [
@@ -483,4 +599,4 @@ async def run_deep_events(
             else:
                 break
 
-    yield {"type": "done", "mode": done_mode}
+    yield {"type": "done", "mode": done_mode, "budget": budget.meta()}
