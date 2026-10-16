@@ -433,6 +433,46 @@ def get_settings() -> Settings:
     return _build_settings()
 
 
+# 启动告警要核对的敏感配置键（对照 .env.example 的同名示例值）
+TEMPLATE_DEFAULT_KEYS = ("LLM_API_KEY", "PG_PASSWORD", "NEO4J_PASSWORD", "TAVILY_API_KEY", "ZHIPUAI_API_KEY")
+
+
+@lru_cache(maxsize=1)
+def _env_example_values() -> dict[str, str]:
+    """解析 .env.example 的 KEY=VALUE（跳过注释与空行）；文件缺失返回空表。"""
+    try:
+        text = (PROJECT_ROOT / ".env.example").read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    values: dict[str, str] = {}
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, _, value = stripped.partition("=")
+        values[key.strip()] = value.strip()
+    return values
+
+
+def template_default_keys(s: Settings, example: dict[str, str] | None = None) -> list[str]:
+    """返回「当前生效值仍等于 .env.example 示例值」的配置键。
+
+    空值也判命中：.env.example 里没给示例密钥的键，当前值仍是空就说明
+    「从没改过模板」（未配置 + 未替换），同样如实报进风险列表。
+    只用于启动 WARNING 与 /api/health 的风险标记，绝不影响启动与请求。
+    example 可注入（测试用），缺省读项目根的 .env.example。
+    """
+    env_example = _env_example_values() if example is None else example
+    hits: list[str] = []
+    for key in TEMPLATE_DEFAULT_KEYS:
+        if key not in env_example:
+            continue
+        current = str(getattr(s, key.lower(), "") or "").strip()
+        if current == env_example[key].strip():
+            hits.append(key)
+    return hits
+
+
 class ModelOverrideError(ValueError):
     """请求体 model 字段非法或目标供应商未配置（绝不静默回退默认模型）。"""
 

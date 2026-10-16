@@ -144,6 +144,17 @@ export default function StatusCards({ health, kb, schema, metrics, metricsLocked
 
   return (
     <>
+      {/* 模板默认值风险：醒目提示，只提醒不阻断（后端启动时同样只打 WARNING） */}
+      {health?.template_default_risk && (
+        <div
+          className="notice notice-warn"
+          style={{ display: "flex", alignItems: "center", gap: "var(--sp-8)" }}
+          role="alert"
+        >
+          <Icon name="alert" size={14} />
+          仍有配置等于 .env.example 的模板默认值（LLM/PG/Neo4j/Tavily/智谱密钥之一），请尽快在 .env 中更换。
+        </div>
+      )}
       {groups.map((group) => (
         <div key={group.title}>
           <div className="stat-group-title">

@@ -70,6 +70,8 @@ export type Health = {
   modes?: ChatMode[];
   index: KbStats;
   ingesting: boolean;
+  /** 新增：仍有配置等于 .env.example 的模板默认值（启动 WARNING 同源判定） */
+  template_default_risk?: boolean;
 };
 
 export type MetricsSummary = {

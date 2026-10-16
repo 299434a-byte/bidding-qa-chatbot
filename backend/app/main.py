@@ -37,7 +37,13 @@ from . import auth, history as history_store
 from . import ratelimit
 from .agent import MODES, TOOL_NAME, agent_events
 
-from .config import ModelOverrideError, Settings, get_settings, resolve_model_settings
+from .config import (
+    ModelOverrideError,
+    Settings,
+    get_settings,
+    resolve_model_settings,
+    template_default_keys,
+)
 
 from .db import DatabaseUnavailable, discover_schema, list_tables, mysql_connection
 
@@ -88,6 +94,14 @@ app.add_middleware(
 
 setup_logging(get_settings())
 logger = get_logger(__name__)
+
+# 启动告警：配置仍等于 .env.example 的示例值（模板默认值）时打 WARNING，但绝不拒绝启动
+_default_keys = template_default_keys(get_settings())
+if _default_keys:
+    logger.warning(
+        "以下配置仍在用模板默认值（.env.example），请尽快更换：%s",
+        ", ".join(_default_keys),
+    )
 
 
 class ChatRequest(BaseModel):
@@ -337,6 +351,8 @@ def health() -> dict[str, Any]:
         "index": store_stats,
         "ingesting": _ingest_state["running"],
         "kb_version": kb_version(s),
+        # 新增布尔字段：是否仍有配置等于 .env.example 的模板默认值（启动 WARNING 同源判定）
+        "template_default_risk": bool(template_default_keys(s)),
     }
 
 
