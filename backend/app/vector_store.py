@@ -184,6 +184,36 @@ class VectorStore:
                     break
         return existing
 
+    def missing_doc_ids(self, doc_ids: list[str], batch_size: int = 256) -> set[str]:
+        """哪些 doc_id 已不在库里（追问复用前的失效校验）。
+
+        集合不存在或读取出错时，视为**全部缺失**（校验失败一律退回完整链路，绝不带病复用）。
+        """
+        wanted = {str(d) for d in doc_ids if d}
+        if not wanted:
+            return set()
+        if not self.collection_exists():
+            return wanted
+        point_ids = [point_id_of(doc_id) for doc_id in wanted]
+        found: set[str] = set()
+        try:
+            with self._lock:
+                for start in range(0, len(point_ids), batch_size):
+                    points = self.client.retrieve(
+                        collection_name=self.collection,
+                        ids=point_ids[start : start + batch_size],
+                        with_payload=True,
+                        with_vectors=False,
+                    )
+                    for point in points:
+                        payload = point.payload or {}
+                        doc_id = payload.get("doc_id")
+                        if doc_id:
+                            found.add(str(doc_id))
+        except Exception:  # noqa: BLE001 - 读取失败视为全部缺失（校验从严）
+            return wanted
+        return wanted - found
+
     def delete_documents(self, doc_ids: list[str], batch_size: int = 256) -> int:
         """按 doc_id 批量删除点，返回**请求删除**的 ID 数。"""
         if not doc_ids:

@@ -47,7 +47,7 @@ from .ingest import run_ingest
 
 from .pg import PG_TOOL_NAME, PgError, load_schema as load_pg_schema, render_schema_text as render_pg_schema_text
 
-from .rag import answer_events
+from .rag import answer_events, reused_answer_events
 
 from .rerank import rerank_hits
 
@@ -837,6 +837,25 @@ def _finalize_qa(
     )
 
 
+def _followup_evidence(conversation_id: str, s: Settings) -> list[dict[str, Any]] | None:
+    """追问复用前的失效校验：kb_version 一致 **且** 来源块仍在库里。
+
+    任一校验不通过（或校验本身出错）返回 ``None`` —— 放弃复用、走完整链路，绝不猜。
+    """
+    evidence = answer_cache.get_last_evidence(conversation_id, s)
+    if not evidence or not evidence.get("sources"):
+        return None
+    if evidence.get("kb_version") != kb_version(s):
+        return None
+    try:
+        doc_ids = [str(d.get("doc_id") or "") for d in evidence["sources"] if d.get("doc_id")]
+        if not doc_ids or get_store(s).missing_doc_ids(doc_ids):
+            return None
+    except Exception:  # noqa: BLE001 - 校验失败一律退回完整链路
+        return None
+    return list(evidence["sources"])
+
+
 @app.post("/api/chat")
 def chat(
     payload: ChatRequest,
@@ -1061,27 +1080,58 @@ async def agent_chat(
             yield "data: [DONE]\n\n"
             return
 
+        # —— 追问复用：命中上一问证据则跳过检索/规划，直接用旧证据作答 ——
+        # 只在「会话已落库 + 纯知识库问答 + 非 deep」时尝试；判定或校验失败一律走完整链路。
+        reused_sources: list[dict[str, Any]] | None = None
+        if (
+            conversation is not None
+            and not model_override
+            and not use_web
+            and mode != "deep"
+            and answer_cache.is_followup(payload.question)
+        ):
+            reused_sources = _followup_evidence(conversation["id"], s)
+
         disconnected = False
         try:
-            async for event in agent_events(
-                payload.question,
-                settings=s,
-                final_k=payload.top_k,
-                history=history,
-                web_search=payload.web_search,
-                mode=mode,
-            ):
-                collector.feed(event)
-                if (
-                    first_token_ms is None
-                    and event.get("type") == "delta"
-                    and (event.get("channel") or "answer") != "revision"
+            if reused_sources is not None:
+                metrics_store.bump("followup_reused", settings=s)
+                iterator = iter(reused_answer_events(payload.question, reused_sources, settings=s))
+                while True:
+                    event = await asyncio.to_thread(next, iterator, None)
+                    if event is None:
+                        break
+                    collector.feed(event)
+                    if (
+                        first_token_ms is None
+                        and event.get("type") == "delta"
+                        and (event.get("channel") or "answer") != "revision"
+                    ):
+                        first_token_ms = (time.perf_counter() - request_started) * 1000
+                    yield _sse(event)
+                    if await request.is_disconnected():
+                        disconnected = True
+                        break
+            else:
+                async for event in agent_events(
+                    payload.question,
+                    settings=s,
+                    final_k=payload.top_k,
+                    history=history,
+                    web_search=payload.web_search,
+                    mode=mode,
                 ):
-                    first_token_ms = (time.perf_counter() - request_started) * 1000
-                yield _sse(event)
-                if await request.is_disconnected():
-                    disconnected = True
-                    break
+                    collector.feed(event)
+                    if (
+                        first_token_ms is None
+                        and event.get("type") == "delta"
+                        and (event.get("channel") or "answer") != "revision"
+                    ):
+                        first_token_ms = (time.perf_counter() - request_started) * 1000
+                    yield _sse(event)
+                    if await request.is_disconnected():
+                        disconnected = True
+                        break
         except Exception as exc:  # noqa: BLE001 - 流式响应里出错只能以事件形式告知前端
             yield _sse({"type": "error", "message": f"服务异常：{exc}"})
 
@@ -1115,6 +1165,7 @@ async def agent_chat(
             answer_cache.set_cached(
                 payload.question, answer, collector.sources, collector.done_mode or mode, s,
                 key_mode=mode, top_k=payload.top_k,
+                conversation_id=conversation["id"] if conversation else None,
             )
 
         _finalize_qa(

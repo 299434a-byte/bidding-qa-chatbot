@@ -4,9 +4,10 @@
   - 规范化问题文本并生成缓存键（含问答模式与 top_k，避免跨模式串答案）
   - 读写缓存，fail-open：任何存储异常都不影响问答主流程
   - 按知识库版本指纹判定旧条目失效；未登录请求不进缓存
+  - 追问复用：按会话取最近一次带来源的回答（get_last_evidence）+ 规则版追问判定（is_followup）
 
 依赖：config、kb_version
-被谁调用：main（/api/chat、/api/agent/chat 的缓存读写）
+被谁调用：main（/api/chat、/api/agent/chat 的缓存读写与追问复用）
 """
 
 from __future__ import annotations
@@ -38,6 +39,8 @@ CREATE TABLE IF NOT EXISTS answer_cache (
 """
 
 _ALTER_ADD_KB_VERSION = "ALTER TABLE answer_cache ADD COLUMN kb_version TEXT NOT NULL DEFAULT 'unknown'"
+# 追问复用：按会话回捞「上一问证据」需要知道这条缓存属于哪个会话（老库自动补列）。
+_ALTER_ADD_CONVERSATION_ID = "ALTER TABLE answer_cache ADD COLUMN conversation_id TEXT NOT NULL DEFAULT ''"
 
 _schema_ready: set[str] = set()
 _schema_lock = threading.Lock()
@@ -80,6 +83,39 @@ def cache_key(question: str, *, mode: str = "react", top_k: int | None = None) -
 def looks_sensitive(question: str) -> bool:
     """粗筛：问题里是否疑似含敏感信息（见 ``_SENSITIVE_RE``）。"""
     return bool(_SENSITIVE_RE.search(question or ""))
+
+
+# —— 追问判定（规则版，零模型）——
+# 指代 / 延续词：命中其一才可能是追问（判定失败一律走完整链路，绝不猜）。
+_FOLLOWUP_MARKER_RE = re.compile(
+    r"那|它|这个|那个|这条|那份|这样|那么|刚才|上面|前面|之前|"
+    r"第[一二三四五六七八九十百零\d]+|呢$|呢[？?。!]$"
+)
+
+# 新实体词：编号 / 日期 / 机构名 / 法规标准名 / 金额 —— 出现任何一个都说明问题带了新话题，
+# 不是单纯延续上一问，必须走完整检索。
+_ENTITY_RES = (
+    re.compile(r"[A-Za-z]{2,}[-_]?\d{2,}|\d{4,}"),  # 项目/单证编号（ZB2024-001、12345678）
+    re.compile(r"\d{4}\s*[-年/.]\s*\d{1,2}"),  # 日期（2024-09、2024年9月）
+    re.compile(r"(有限公司|股份|集团|公司|研究院|设计院|事务所|银行)"),  # 机构名
+    re.compile(r"《[^》]+》|(办法|条例|规定|细则|标准|规范|导则)"),  # 法规 / 标准名
+    re.compile(r"\d+(?:\.\d+)?\s*(?:万|亿)?\s*元"),  # 金额
+)
+
+
+def is_followup(question: str) -> bool:
+    """规则版追问判定（纯函数）：短 + 有指代/延续词 + 无新实体词才算追问。
+
+    三条必须同时成立；任何一条拿不准都返回 ``False`` —— 失败必须退回完整链路，绝不猜。
+    """
+    text = normalize_question(question)
+    if not text or len(text) > 15:
+        return False
+    if not _FOLLOWUP_MARKER_RE.search(text):
+        return False
+    if any(rx.search(text) for rx in _ENTITY_RES):
+        return False
+    return True
 
 
 def is_cacheable(
@@ -153,6 +189,8 @@ def _ensure_schema(conn: sqlite3.Connection, path: Path) -> None:
         cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(answer_cache)")}
         if "kb_version" not in cols:
             conn.execute(_ALTER_ADD_KB_VERSION)
+        if "conversation_id" not in cols:
+            conn.execute(_ALTER_ADD_CONVERSATION_ID)
         conn.commit()
         _schema_ready.add(key)
 
@@ -230,8 +268,12 @@ def set_cached(
     *,
     key_mode: str | None = None,
     top_k: int | None = None,
+    conversation_id: str | None = None,
 ) -> bool:
-    """写缓存。成功返回 ``True``；任何失败静默返回 ``False``（不影响问答）。"""
+    """写缓存。成功返回 ``True``；任何失败静默返回 ``False``（不影响问答）。
+
+    ``conversation_id``：本条回答所属会话（追问复用按它回捞上一问证据）；不传则留空。
+    """
     s = settings or get_settings()
     try:
         if not normalize_question(question) or not (answer or "").strip():
@@ -242,14 +284,62 @@ def set_cached(
             _ensure_schema(conn, s.cache_db_path)
             conn.execute(
                 "INSERT OR REPLACE INTO answer_cache "
-                "(cache_key, question, answer, sources_json, mode, created_at, kb_version) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (key, question, answer, sources_json, mode or "llm", _now_iso(), kb_version.kb_version(s)),
+                "(cache_key, question, answer, sources_json, mode, created_at, kb_version, conversation_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    key,
+                    question,
+                    answer,
+                    sources_json,
+                    mode or "llm",
+                    _now_iso(),
+                    kb_version.kb_version(s),
+                    conversation_id or "",
+                ),
             )
             conn.commit()
         return True
     except Exception:
         return False
+
+
+def get_last_evidence(conversation_id: str, settings: Settings | None = None) -> dict[str, Any] | None:
+    """取该会话最近一次「带来源」的回答证据（追问复用的输入）。
+
+    返回 ``{question, answer, sources, mode, kb_version, created_at}``；
+    无会话 / 无带来源的回答 / 任何异常一律返回 ``None`` —— 调用方必须退回完整链路。
+    注意：这里**不校验 kb_version**（由调用方对照当前版本后决定是否复用）。
+    """
+    s = settings or get_settings()
+    try:
+        if not (conversation_id or "").strip():
+            return None
+        with _connect(s) as conn:
+            _ensure_schema(conn, s.cache_db_path)
+            rows = conn.execute(
+                "SELECT question, answer, sources_json, mode, kb_version, created_at "
+                "FROM answer_cache WHERE conversation_id = ? "
+                "ORDER BY created_at DESC, rowid DESC LIMIT 10",
+                (conversation_id,),
+            ).fetchall()
+        for row in rows:
+            try:
+                sources = json.loads(row["sources_json"] or "[]")
+            except Exception:
+                continue
+            if not isinstance(sources, list) or not sources:
+                continue
+            return {
+                "question": row["question"],
+                "answer": row["answer"],
+                "sources": sources,
+                "mode": row["mode"],
+                "kb_version": row["kb_version"],
+                "created_at": row["created_at"],
+            }
+        return None
+    except Exception:
+        return None
 
 
 def clear(settings: Settings | None = None) -> bool:

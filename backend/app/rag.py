@@ -6,9 +6,10 @@
   - 覆盖率闸门：检索块与问题关键词重合度不足时拒绝进入生成（防答非所问）
   - 流式生成回答并做引用校验（检索无结果时输出 REF_1 标准文案）
   - 渲染来源引用文本块
+  - 追问复用：以上一问证据直接作答（reused_answer_events，跳过检索/规划）
 
 依赖：retriever、rerank、llm、citation、config、metrics
-被谁调用：main（/api/chat）、agent、deep_agent
+被谁调用：main（/api/chat、/api/agent/chat 的追问复用）、agent、deep_agent
 """
 
 from __future__ import annotations
@@ -183,6 +184,21 @@ def answer_events(
 
     metrics_store.bump("coverage_pass", settings=s)
 
+    yield from _stream_generated_answer(question, sources, s)
+
+
+def _stream_generated_answer(
+    question: str,
+    sources: list[dict[str, Any]],
+    s: Settings,
+    *,
+    done_extra: dict[str, Any] | None = None,
+) -> Iterator[dict[str, Any]]:
+    """对**已确定的来源**流式生成答案（完整链路与追问复用链路共用）。
+
+    事件顺序：delta("") → thinking/delta* → done → [citation_check + revision]。
+    ``done_extra`` 会并入 done 事件（如追问复用标注 reused=true）。
+    """
     yield {"type": "delta", "text": ""}
     answer_parts: list[str] = []
     # 思维链缓冲：stream_chat 在正文间隙回调 on_thinking，这里转成独立的 thinking 事件
@@ -204,14 +220,14 @@ def answer_events(
         yield from _drain_thinking()
     except LLMNotConfigured:
         yield {"type": "delta", "text": retrieval_only_answer(sources)}
-        yield {"type": "done", "mode": "retrieval_only"}
+        yield {"type": "done", "mode": "retrieval_only", **(done_extra or {})}
         return
     except LLMError as exc:
         yield {"type": "error", "message": str(exc)}
-        yield {"type": "done", "mode": "llm_failed"}
+        yield {"type": "done", "mode": "llm_failed", **(done_extra or {})}
         return
 
-    yield {"type": "done", "mode": "llm"}
+    yield {"type": "done", "mode": "llm", **(done_extra or {})}
 
     try:
         check = verify_citations("".join(answer_parts), sources)
@@ -227,3 +243,34 @@ def answer_events(
             "issues": check.get("issues") or [],
             "number_checks": check.get("number_checks") or [],
         }
+
+
+def reused_answer_events(
+    question: str,
+    sources: list[dict[str, Any]],
+    settings: Settings | None = None,
+) -> Iterator[dict[str, Any]]:
+    """追问复用链路：跳过检索与规划，直接以上一问证据流式作答。
+
+    事件结构与 :func:`answer_events` 同构（retrieval / sources / delta / done），
+    retrieval.meta 与 done 里都带 ``reused=true``，前端据此可提示「复用了上一问证据」。
+    """
+    s = settings or get_settings()
+    yield {
+        "type": "retrieval",
+        "meta": {
+            "reused": True,
+            "final_count": len(sources),
+            "llm_configured": s.llm_configured,
+        },
+    }
+    yield {"type": "sources", "sources": sources}
+    if not sources:
+        yield {"type": "delta", "text": NO_DATA_MESSAGE}
+        yield {"type": "done", "mode": "no_data", "reused": True}
+        return
+    if not s.llm_configured:
+        yield {"type": "delta", "text": retrieval_only_answer(sources)}
+        yield {"type": "done", "mode": "retrieval_only", "reused": True}
+        return
+    yield from _stream_generated_answer(question, sources, s, done_extra={"reused": True})
