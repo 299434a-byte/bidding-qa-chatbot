@@ -159,12 +159,27 @@ cd backend
 
 ### 4. Neo4j（可选，供 Agent 做关系查询）
 
+**图数据从哪来**：与向量库/PG 同源，都是业务两张表 `projects` / `procurement_notices`（各 933 行，
+以 `project_name` 关联），建成 `(:Project)-[:PUBLISHED]->(:Notice)` 两类节点 + 一类关系。
+
+**怎么重建**（幂等，可重复执行）：
+
 ```powershell
-# 1) 启动 Neo4j，并在 .env 填好 NEO4J_USER / NEO4J_PASSWORD
-# 2) 从远程 MySQL 建图（幂等，可重复执行）
+# 1) .env 填好 Neo4j 连接：本地 bolt:// 或 Aura 云服务 neo4j+s:// 二选一（见 .env.example 注释）
+# 2) 从本机 PostgreSQL 建图（缺省跟随 KB_SOURCE，也可显式 --source pg）
 cd backend
-..\.venv\Scripts\python.exe import_neo4j.py
+..\.venv\Scripts\python.exe import_neo4j.py --source pg --batch 500
+# 从原远程 MySQL 建图（旧行为，--source mysql 完全不变）
+..\.venv\Scripts\python.exe import_neo4j.py --source mysql
 ```
+
+成功判定：打印 Project / Notice / PUBLISHED 三个数字（应为 **933 / 933 / 933**，关系数 < 900 会以非 0 退出码报错）；
+连跑两遍三个数字不变即幂等。
+
+**Aura 云服务注意事项**：
+- URI 必须 `neo4j+s://`（TLS），**用户名是实例 ID（不是 `neo4j`）**，库名通常也是实例 ID（`SHOW DATABASES` 可查）；
+- 免费层**闲置 3 天会自动暂停**，需去 console.neo4j.io 点 Resume；建图与查询都要走网络出口；
+- 库名配错时后端会回退默认库并打 WARNING（图谱工具不整体挂掉），但应尽快改对 `.env`。
 
 ### 5. 建知识库（把数据灌进向量库）
 
@@ -371,7 +386,7 @@ bidding-qa-chatbot/
 │   ├── tests/                  pytest 离线单元测试
 │   ├── copy_mysql.py           远程 MySQL → 本机 MySQL（数据留底）
 │   ├── sync_pg.py              远程 MySQL → 本机 PostgreSQL（统计查询）
-│   └── import_neo4j.py         远程 MySQL → Neo4j 知识图谱（关系查询）
+│   └── import_neo4j.py         业务库(PG/MySQL) → Neo4j 知识图谱（关系查询）
 ├── frontend/                   Next.js 前端（对话页 + /admin 后台控制台）
 ├── scripts/                    Windows 一键启停脚本（start.bat / stop.bat）
 ├── data/                       运行时数据（向量库 / BM25 索引 / 历史库，不入库）

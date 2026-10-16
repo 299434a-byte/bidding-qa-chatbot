@@ -90,6 +90,30 @@ python -m app.ingest
 
 再次强调：**不要拷贝 `data\qdrant` 到不同版本环境**。它只在「同一 Qdrant 版本 + 同一嵌入模型 + 同一套集合结构」下才可移植，版本稍有差异就会加载失败或静默检索错乱；重建成本只有几分钟，拷贝省下的时间不值得冒这个险。
 
+### 知识图谱（Neo4j / Aura）数据重建（可选，供 Agent 关系查询）
+
+向量库与 PG 之外，关系查询走 Neo4j。图数据与它们同源，都是业务两张表 `projects` / `procurement_notices`
+（各 933 行，以 `project_name` 关联），建成 `(:Project)-[:PUBLISHED]->(:Notice)`。
+
+```powershell
+cd backend
+# 缺省跟随 KB_SOURCE；从本机 PostgreSQL 建图（幂等，可重复执行）
+python import_neo4j.py --source pg --batch 500
+# 从原远程 MySQL 建图（旧行为，--source mysql 完全不变）
+python import_neo4j.py --source mysql
+```
+
+成功判据：打印 Project / Notice / PUBLISHED 三个数字（**933 / 933 / 933**，关系数 < 900 以非 0 退出码报错）；
+连跑两遍三个数字不变即幂等。
+
+Aura 云服务注意事项：
+
+- `.env` 的 `NEO4J_URI` 必须 `neo4j+s://`（TLS），**用户名是实例 ID 而不是 `neo4j`**，库名通常也是
+  实例 ID（`SHOW DATABASES` 可查）；本地 Neo4j 则用 `bolt://127.0.0.1:7687`，二选一见 `.env.example` 注释；
+- 免费层**闲置 3 天自动暂停**，需去 console.neo4j.io 点 Resume 后才能建图/查询；建图与查询都要走网络出口；
+- 库名配错（如删建实例后实例 ID 变了）时后端会回退默认库并打 WARNING，图谱工具不整体挂掉，但应尽快改对 `.env`；
+- 建图脚本复用 `app/pg_source.py` 只读连接（`default_transaction_read_only=on`），对源库只 SELECT 不写。
+
 ## 3. 启动顺序（服务器）
 
 1. Qdrant（向量库）；

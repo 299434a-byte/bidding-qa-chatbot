@@ -110,3 +110,9 @@
 - **计划（原状）**：`.env` 留着 `.env.example` 的示例值照常启动，没有任何提示。
 - **实现**：`config.template_default_keys()` 对照 `.env.example` 检查 `LLM_API_KEY` / `PG_PASSWORD` / `NEO4J_PASSWORD` / `TAVILY_API_KEY` / `ZHIPUAI_API_KEY` 是否仍等于模板值（含空值——没改过模板即命中；example 可注入便于测试）。`main` 在 `setup_logging` 之后执行，命中即 `logger.warning` 列出键名；**绝不拒绝启动**（本地演示优先）。`/api/health` 新增布尔字段 `template_default_risk`（同源判定，只新增不改已有字段），后台状态卡命中时展示醒目 `notice-warn`。
 - **原因**：示例密钥照常启动是典型的「本地能跑、上线即事故」隐患，但直接拒绝启动会把本地演示和离线测试一起挡在门外——告警的正确形态是**吵但不拦**。判定放进 health 是为了让风险可轮询、可被前端展示，而不是只存在于一次性的启动日志里。
+
+## 17. 图库部署：计划「本地 Neo4j」→ 实现 Neo4j Aura 云服务 + 本机 PostgreSQL 建图
+
+- **计划（原状）**：知识图谱跑在本地 Neo4j（`bolt://127.0.0.1:7687`），`import_neo4j.py` 只会从远程 MySQL 读数建图。
+- **实现**：`import_neo4j.py` 增加 `--source {pg,mysql}`（缺省跟随 `KB_SOURCE`），PG 分支复用 `app/pg_source.py` 的只读连接（`default_transaction_read_only=on`，对源库只 SELECT），按 `--batch` 分批读取 `projects` / `procurement_notices` 两表并做类型归一化（Decimal→float、日期→ISO、None 保持 None），仍以 MERGE + UNWIND 参数分批幂等建图。连接目标改为 Aura：`.env` 填 `neo4j+s://<实例ID>.databases.neo4j.io`，**用户名与库名都是实例 ID**（`SHOW DATABASES` 实测该实例只有实例 ID 与 system 两个库，不存在名为 `neo4j` 的库）。配套两处健壮性修正：① neo4j 驱动 v6 兼容——`default_access_mode` 从 `driver()` 挪到 `session()`、查询超时改挂 `session.run(Query)`（v6 的 `tx.run` 不再接受 Query 对象）；② `graph.py` 建会话处按配置库名报 DatabaseNotFound 时**回退默认库（不传 database）**并打一次 WARNING（Aura 删建实例后实例 ID 变化三处要跟着改，漏改库名不应让图谱工具整体失败），只回退一次、不吞其它错误。
+- **原因**：本机只有 Neo4j 的 Linux 发行包，Windows 环境起不了服务，图谱链路一直处于「配了本地地址但连不上」的半残状态；图数据量很小（两表各 933 行、共 1866 节点 + 933 关系），适合交给托管的 Aura 免费层。**数据与检索仍全部在本地**——Qdrant 嵌入式向量库、PostgreSQL、SQLite 对话历史、BGE 本地推理一个都没外迁，只有图数据库这一小块上云；代价是依赖网络出口（Aura 免费层闲置 3 天自动暂停，需去控制台 Resume），以及密码曾在明文截图中出现、需要 Reset password 轮换（见第 5 步安全收尾）。
