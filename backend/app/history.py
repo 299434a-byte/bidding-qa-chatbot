@@ -1,12 +1,13 @@
 """history：对话历史持久化（SQLite + FTS5 全文检索，按用户分区）。
 
 职责：
-  - 会话 / 消息 CRUD 与 schema 迁移（建表、分词词表升级）
+  - 会话 / 消息 CRUD 与 schema 迁移（建表、分词词表升级、users 表补列）
   - FTS5 全文检索 + 时间 / 模式 / 主题多维过滤
   - 消息预览高亮（<em>）与会话标题自动生成
+  - 账号状态 / 角色（status: active/disabled；role: user/admin）与后台用户管理
 
 依赖：config、bm25（FTS 分词）、timeutil（时间口径）
-被谁调用：main（/api/history/* 端点）、auth（按用户校验分区）
+被谁调用：main（/api/history/*、/api/admin/* 端点）、auth（按用户校验分区与状态）
 """
 
 from __future__ import annotations
@@ -84,7 +85,9 @@ CREATE TABLE IF NOT EXISTS users (
     salt          TEXT NOT NULL,
     iterations    INTEGER NOT NULL,
     created_at    TEXT NOT NULL,
-    last_login_at TEXT
+    last_login_at TEXT,
+    status        TEXT NOT NULL DEFAULT 'active',
+    role          TEXT NOT NULL DEFAULT 'user'
 );
 
 CREATE TABLE IF NOT EXISTS auth_sessions (
@@ -175,6 +178,12 @@ def ensure_schema(settings: Settings | None = None) -> None:
             return
         with _connect(s) as conn, conn:
             conn.executescript(_DDL)
+            # 老库兜底迁移：自动补 status / role 列（默认 active / user）。
+            user_cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(users)")}
+            if "status" not in user_cols:
+                conn.execute("ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'active'")
+            if "role" not in user_cols:
+                conn.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'")
             try:
                 conn.executescript(_FTS_DDL)
                 _fts_supported[key] = True
@@ -354,13 +363,18 @@ def create_user(
         "iterations": iterations,
         "created_at": _now(),
         "last_login_at": None,
+        # 注册一律默认角色 / 默认状态：请求体里伪造任何权限字段都到不了这里。
+        "status": "active",
+        "role": "user",
     }
     try:
         with _connect(settings) as conn, conn:
             conn.execute(
                 """
-                INSERT INTO users (id, username, password_hash, salt, iterations, created_at, last_login_at)
-                VALUES (:id, :username, :password_hash, :salt, :iterations, :created_at, :last_login_at)
+                INSERT INTO users
+                    (id, username, password_hash, salt, iterations, created_at, last_login_at, status, role)
+                VALUES
+                    (:id, :username, :password_hash, :salt, :iterations, :created_at, :last_login_at, :status, :role)
                 """,
                 user,
             )
@@ -414,7 +428,8 @@ def get_session_user(settings: Settings, token_hash: str) -> dict[str, Any] | No
         row = conn.execute(
             """
             SELECT s.expires_at AS expires_at,
-                   u.id AS id, u.username AS username, u.created_at AS created_at
+                   u.id AS id, u.username AS username, u.created_at AS created_at,
+                   u.status AS status, u.role AS role
             FROM auth_sessions s JOIN users u ON u.id = s.user_id
             WHERE s.token_hash = ?
             """,
@@ -425,7 +440,50 @@ def get_session_user(settings: Settings, token_hash: str) -> dict[str, Any] | No
     if timeutil.is_past(str(row["expires_at"])):
         delete_session(settings, token_hash)
         return None
-    return {"id": row["id"], "username": row["username"], "created_at": row["created_at"]}
+    return {
+        "id": row["id"],
+        "username": row["username"],
+        "created_at": row["created_at"],
+        "status": row["status"] or "active",
+        "role": row["role"] or "user",
+    }
+
+
+def set_user_status(settings: Settings, user_id: str, status: str) -> dict[str, Any] | None:
+    """停用 / 启用账号（后台管理）。状态非法抛 ValueError；用户不存在返回 None。"""
+    clean = (status or "").strip().lower()
+    if clean not in ("active", "disabled"):
+        raise ValueError("status 只能是 active 或 disabled")
+    ensure_schema(settings)
+    with _connect(settings) as conn, conn:
+        cur = conn.execute("UPDATE users SET status = ? WHERE id = ?", (clean, user_id))
+        if not cur.rowcount:
+            return None
+    return get_user_by_id(settings, user_id)
+
+
+def set_user_role(settings: Settings, user_id: str, role: str) -> dict[str, Any] | None:
+    """改账号角色（user/admin）。角色非法抛 ValueError；用户不存在返回 None。"""
+    clean = (role or "").strip().lower()
+    if clean not in ("user", "admin"):
+        raise ValueError("role 只能是 user 或 admin")
+    ensure_schema(settings)
+    with _connect(settings) as conn, conn:
+        cur = conn.execute("UPDATE users SET role = ? WHERE id = ?", (clean, user_id))
+        if not cur.rowcount:
+            return None
+    return get_user_by_id(settings, user_id)
+
+
+def list_users(settings: Settings) -> list[dict[str, Any]]:
+    """全部账号（后台管理页用）：只暴露非敏感字段。"""
+    ensure_schema(settings)
+    with _connect(settings) as conn:
+        rows = conn.execute(
+            "SELECT id, username, role, status, created_at, last_login_at FROM users "
+            "ORDER BY created_at ASC, id ASC"
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def delete_session(settings: Settings, token_hash: str) -> None:

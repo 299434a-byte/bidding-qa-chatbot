@@ -92,11 +92,25 @@ export type User = {
   id: string;
   username: string;
   created_at?: string;
+  /** 角色：user（普通）/ admin（管理员）；老后端可能没有该字段 */
+  role?: string;
+  /** 账号状态：active / disabled；老后端可能没有该字段 */
+  status?: string;
 };
 
 export type AuthResponse = {
   token: string;
-  user: { id: string; username: string };
+  user: { id: string; username: string; role?: string; status?: string };
+};
+
+/** 后台用户管理列表项（只含非敏感字段） */
+export type AdminUser = {
+  id: string;
+  username: string;
+  role: string;
+  status: string;
+  created_at?: string | null;
+  last_login_at?: string | null;
 };
 
 export type Conversation = {
@@ -440,8 +454,19 @@ export const api = {
     }),
   /** 注销：通知后端作废令牌。收到 401（令牌本就失效）也已在 authFetch 里清掉本地令牌 */
   logout: () => authReq<{ ok: boolean; username: string }>("/api/auth/logout", { method: "POST" }),
-  /** 查询当前登录用户 */
-  me: () => authReq<{ user: User }>("/api/auth/me"),
+  /** 查询当前登录用户（is_admin 由后端判定：role=admin 或 AUTH_ADMIN_USERS 白名单） */
+  me: () => authReq<{ user: User; is_admin?: boolean }>("/api/auth/me"),
+
+  // ------------------------------ 后台用户管理（仅管理员） ------------------------------ //
+  /** 账号列表（仅管理员；非管理员 403） */
+  adminUsers: () => authReq<{ items: AdminUser[] }>("/api/admin/users"),
+  /** 停用 / 启用账号（仅管理员） */
+  adminSetUserStatus: (userId: string, status: "active" | "disabled") =>
+    authReq<{ user: AdminUser }>(`/api/admin/users/${encodeURIComponent(userId)}/status`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status }),
+    }),
 
   // ------------------------------ 对话历史 ------------------------------ //
   /** 会话列表（分页，可按关键词 / 模式过滤） */

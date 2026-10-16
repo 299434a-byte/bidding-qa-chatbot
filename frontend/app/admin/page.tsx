@@ -11,6 +11,7 @@ import DebugConsole from "@/components/admin/DebugConsole";
 import EvalCard from "@/components/admin/EvalCard";
 import SchemaCard from "@/components/admin/SchemaCard";
 import HistorySearch from "@/components/admin/HistorySearch";
+import UserManage from "@/components/admin/UserManage";
 import Icon from "@/components/ui/icons";
 import {
   api,
@@ -48,6 +49,8 @@ export default function AdminPage() {
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [user, setUser] = useState<User | null>(null);
+  /** 后端判定的管理员身份（账号管理卡仅管理员可见可操作） */
+  const [isAdmin, setIsAdmin] = useState(false);
   const [authOpen, setAuthOpen] = useState(false);
 
   const [toasts, pushToast] = useToasts();
@@ -148,7 +151,10 @@ export default function AdminPage() {
     void (async () => {
       try {
         const res = await api.me();
-        if (alive) setUser(res.user);
+        if (alive) {
+          setUser(res.user);
+          setIsAdmin(res.is_admin === true);
+        }
       } catch {
         if (alive && !tokenNotified.current) {
           tokenNotified.current = true;
@@ -243,6 +249,22 @@ export default function AdminPage() {
         <SchemaCard schema={schema} />
 
         <HistorySearch user={user} />
+
+        <UserManage
+          user={user}
+          isAdmin={isAdmin}
+          onToast={pushToast}
+          onChanged={() => {
+            // 登录态变化后重拉一次 me，保持管理员标记与账号状态同步
+            void api
+              .me()
+              .then((res) => {
+                setUser(res.user);
+                setIsAdmin(res.is_admin === true);
+              })
+              .catch(() => undefined);
+          }}
+        />
       </div>
 
       {/* 复用主页面同一套登录弹窗：登录成功后更新登录态并刷新，使写操作按钮可用 */}
@@ -254,6 +276,11 @@ export default function AdminPage() {
             setAuthOpen(false);
             pushToast(`已登录：${u.username}`, "success");
             void refresh();
+            // 重新判定管理员身份（账号管理卡是否展示取决于它）
+            void api
+              .me()
+              .then((res) => setIsAdmin(res.is_admin === true))
+              .catch(() => undefined);
           }}
         />
       )}

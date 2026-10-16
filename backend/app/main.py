@@ -31,7 +31,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from fastapi.responses import StreamingResponse
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from . import auth, history as history_store
 from . import ratelimit
@@ -137,8 +137,16 @@ class AgentChatRequest(BaseModel):
 
 
 class AuthRequest(BaseModel):
+    # extra="ignore"：注册/登录请求体里的任何多余字段（role/status/is_admin…）一律丢弃，
+    # 权限只能来自服务端（注册硬编码默认角色），杜绝伪造字段提权。
+    model_config = ConfigDict(extra="ignore")
+
     username: str = Field(..., min_length=1, max_length=64, description="用户名（3~32 位中英文/数字/下划线）")
     password: str = Field(..., min_length=1, max_length=128, description="口令（至少 8 位）")
+
+
+class AdminUserStatus(BaseModel):
+    status: Literal["active", "disabled"] = Field(..., description="目标状态：active（启用）/ disabled（停用）")
 
 
 class ConversationCreate(BaseModel):
@@ -443,6 +451,7 @@ def read_config(user: dict[str, Any] = Depends(auth.current_user)) -> dict[str, 
         "auth": {
             "enabled": s.auth_enabled,
             "lockout_seconds": s.auth_lockout_seconds,
+            "admin_users": list(s.auth_admin_users),
         },
     }
 
@@ -543,6 +552,8 @@ def _auth_errors() -> Iterator[None]:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
     except auth.Unauthorized as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except auth.AccountDisabled as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except auth.AuthError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except history_store.HistoryConflict as exc:
@@ -587,6 +598,37 @@ async def auth_logout(
 
 @app.get("/api/auth/me")
 def auth_me(user: dict[str, Any] = Depends(auth.current_user)) -> dict[str, Any]:
+    return {"user": user, "is_admin": auth.is_admin(get_settings(), user)}
+
+
+def require_admin(user: dict[str, Any] = Depends(auth.current_user)) -> dict[str, Any]:
+    """后台管理依赖：必须登录且为管理员，否则 403。"""
+    if not auth.is_admin(get_settings(), user):
+        raise HTTPException(status_code=403, detail="需要管理员权限")
+    return user
+
+
+@app.get("/api/admin/users")
+def admin_list_users(_: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
+    """后台用户列表（仅管理员）：只暴露非敏感字段。"""
+    return {"items": history_store.list_users(get_settings())}
+
+
+@app.post("/api/admin/users/{user_id}/status")
+def admin_set_user_status(
+    user_id: str,
+    payload: AdminUserStatus,
+    admin: dict[str, Any] = Depends(require_admin),
+) -> dict[str, Any]:
+    """停用 / 启用账号（仅管理员）。不允许停用自己（避免把自己锁在门外）。"""
+    if user_id == admin["id"] and payload.status == "disabled":
+        raise HTTPException(status_code=400, detail="不能停用自己的账号")
+    try:
+        user = history_store.set_user_status(get_settings(), user_id, payload.status)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if user is None:
+        raise HTTPException(status_code=404, detail="用户不存在")
     return {"user": user}
 
 
@@ -1267,6 +1309,8 @@ def root() -> dict[str, Any]:
             "POST /api/auth/login",
             "POST /api/auth/logout",
             "GET  /api/auth/me",
+            "GET  /api/admin/users",
+            "POST /api/admin/users/{id}/status",
             "GET  /api/history/conversations",
             "POST /api/history/conversations",
             "GET  /api/history/conversations/{id}",

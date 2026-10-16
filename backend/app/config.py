@@ -207,6 +207,7 @@ class Settings:
     auth_pbkdf2_iterations: int
     auth_max_login_attempts: int
     auth_lockout_seconds: int
+    auth_admin_users: tuple[str, ...]
 
     cache_db_path: Path
     cache_ttl: int
@@ -406,6 +407,7 @@ def _build_settings() -> Settings:
         auth_pbkdf2_iterations=_int("AUTH_PBKDF2_ITERATIONS", 200000),
         auth_max_login_attempts=_int("AUTH_MAX_LOGIN_ATTEMPTS", 5),
         auth_lockout_seconds=_int("AUTH_LOCKOUT_SECONDS", 300),
+        auth_admin_users=tuple(u.strip() for u in _str("AUTH_ADMIN_USERS").split(",") if u.strip()),
         cache_db_path=_path("CACHE_DB_PATH", "./backend/data/answer_cache.db"),
         cache_ttl=_int("CACHE_TTL", 3600),
         metrics_db_path=_path("METRICS_DB_PATH", "./backend/data/metrics.db"),

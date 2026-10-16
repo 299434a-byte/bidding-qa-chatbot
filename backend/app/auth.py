@@ -2,11 +2,12 @@
 
 职责：
   - PBKDF2-HMAC-SHA256 密码哈希存储与校验
-  - 令牌生成、下发与请求态校验（optional_user / require_user）
+  - 令牌生成、下发与请求态校验（optional_user / current_user）
   - 注销时校验并作废当前令牌
+  - 账号停用 enforcement（disabled → 登录/鉴权接口一律 403）与管理员判定
 
-依赖：config、timeutil
-被谁调用：main（鉴权相关端点）、ratelimit（登录态分桶）、history（按用户分区）
+依赖：config、timeutil、history
+被谁调用：main（鉴权与后台管理端点）、ratelimit（登录态分桶）、history（按用户分区）
 """
 
 from __future__ import annotations
@@ -46,6 +47,10 @@ class RateLimited(AuthError):
 
 class Unauthorized(AuthError):
     """拿不到合法令牌（头缺失 / 格式不对 / 令牌为空），上层应返回 401。"""
+
+
+class AccountDisabled(AuthError):
+    """账号已被停用（status=disabled），上层应返回 403。"""
 
 
 def _require_enabled(settings: Settings) -> None:
@@ -134,13 +139,26 @@ def register(
     password: str,
     user_agent: str | None = None,
 ) -> dict[str, Any]:
+    """注册：**只认用户名与口令**，权限字段（role/status/is_admin…）一律忽略。
+
+    落库时 create_user 硬编码 status='active'、role='user' —— 请求体伪造任何
+    权限字段都到不了库里（杜绝注册提权）。
+    """
     _require_enabled(settings)
     username = (username or "").strip()
     validate_credentials(username, password)
     password_hash, salt = hash_password(password, settings.auth_pbkdf2_iterations)
     user = history.create_user(settings, username, password_hash, salt, settings.auth_pbkdf2_iterations)
     token = issue_token(settings, user["id"], user_agent)
-    return {"token": token, "user": {"id": user["id"], "username": user["username"]}}
+    return {
+        "token": token,
+        "user": {
+            "id": user["id"],
+            "username": user["username"],
+            "role": user.get("role") or "user",
+            "status": user.get("status") or "active",
+        },
+    }
 
 
 def login(
@@ -163,10 +181,22 @@ def login(
         _record_failure(settings, username)
         raise AuthError("用户名或口令错误")
 
+    # 口令正确后再看状态：不向未认证者泄露「该账号存在但被停用」。
+    if (user.get("status") or "active") == "disabled":
+        raise AccountDisabled("账号已停用，请联系管理员")
+
     _clear_failures(username)
     history.touch_login(settings, user["id"])
     token = issue_token(settings, user["id"], user_agent)
-    return {"token": token, "user": {"id": user["id"], "username": user["username"]}}
+    return {
+        "token": token,
+        "user": {
+            "id": user["id"],
+            "username": user["username"],
+            "role": user.get("role") or "user",
+            "status": user.get("status") or "active",
+        },
+    }
 
 
 def logout(settings: Settings, raw: str | None) -> None:
@@ -188,27 +218,41 @@ def _bearer(authorization: str | None) -> str | None:
 def optional_user(
     authorization: str | None = Header(None, description="Bearer 令牌；不传则以匿名身份问答（不落库）"),
 ) -> dict[str, Any] | None:
-    """可选登录：令牌为空或无效都返回 None，**不抛异常** —— 保证匿名问答与改动前一致。"""
+    """可选登录：令牌为空 / 无效 / 账号已停用都返回 None，**不抛异常** —— 匿名问答照常。"""
     s = get_settings()
     if not s.auth_enabled:
         return None
     try:
-        return resolve_token(s, _bearer(authorization))
+        user = resolve_token(s, _bearer(authorization))
     except Exception:  # noqa: BLE001 - 数据库异常不应让匿名问答失败
         return None
+    if user is None or user.get("status") == "disabled":
+        return None
+    return user
 
 
 def current_user(
     authorization: str | None = Header(None, description="Bearer 令牌"),
 ) -> dict[str, Any]:
-    """必须登录；未登录返回 401，账号体系未开启返回 503。"""
+    """必须登录；未登录 401，账号已停用 403，账号体系未开启 503。"""
     s = get_settings()
     if not s.auth_enabled:
         raise HTTPException(status_code=503, detail="账号体系未开启（AUTH_ENABLED=false）")
     user = resolve_token(s, _bearer(authorization))
     if user is None:
         raise HTTPException(status_code=401, detail="未登录或登录已过期，请重新登录")
+    if user.get("status") == "disabled":
+        raise HTTPException(status_code=403, detail="账号已停用，请联系管理员")
     return user
+
+
+def is_admin(settings: Settings, user: dict[str, Any] | None) -> bool:
+    """管理员判定：库里 role=admin，或用户名在 AUTH_ADMIN_USERS 白名单里。"""
+    if not user:
+        return False
+    if (user.get("role") or "user") == "admin":
+        return True
+    return bool(user.get("username")) and user["username"] in set(settings.auth_admin_users)
 
 
 def require_bearer(authorization: str | None) -> str:
