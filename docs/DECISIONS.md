@@ -86,3 +86,27 @@
 - **计划（原状）**：只读保护只覆盖 `_read_rows` 一条路径；`_introspect_rows` 走 Neo4j 驱动默认的 WRITE 访问模式，安全性纯靠人工审查；`NEO4J_TIMEOUT` 注释写「查询超时」、实际只管连接与重试。
 - **实现**：建 driver 时指定 `default_access_mode=READ`（内省与查询都落在只读会话上，只读成为**驱动级默认**而非约定）；补真正的单条查询超时（事务超时 `NEO4J_QUERY_TIMEOUT`，已入 `.env.example`），`NEO4J_TIMEOUT` 的注释改回「连接超时与重试」；driver 增加应用关闭钩子（此前只建不关）。
 - **原因**：「约定的只读」在新增一条查询路径时就会失守，「配置的只读」不会——漏写代码还有驱动兜底。查询超时缺失意味着跑飞的变长路径（如无限深度的展开）只能靠人 Ctrl+C，服务端到点终止才叫限制。
+
+## 13. 追问复用：计划「每轮都完整检索+规划」→ 实现规则判追问 + 复用上一问证据
+
+- **计划（原状）**：多轮追问（「那第二条呢」「它的金额是多少」）与首发问题一样走完整链路（检索 → 规划 → 生成），慢且浪费。
+- **实现**：`backend/app/answer_cache.py` 新增纯函数 `is_followup(question)`——**规则版、不引模型**：问题 ≤ 15 字、含指代/延续词（那/它/这个/上面/刚才/第 N 条/呢）、且不含新实体（项目编号、公司名、法规名等）；三条不全中就返回 False。新增 `get_last_evidence(conversation_id)` 从问答缓存表回捞该会话最近一次带来源的回答（表本就有 `sources_json`，新增 `conversation_id` 列并自动补老库）。`main.py` 的 `/api/agent/chat` 在缓存未命中后尝试复用：命中则跳过检索与规划、仍调大模型作答，事件标 `reused=true`。复用前两道失效校验——`kb_version` 与上一问不同、或来源块已不在库（`vector_store.missing_doc_ids`）即放弃复用走完整链路；metrics 新增 `followup_reused` 计数。
+- **原因**：追问的价值在「换个角度问同一批证据」，重新检索既慢又可能召回不同的块导致上下文漂移。但**失败必须退回原链路，绝不猜**——判错追问（把新问题当追问）会拿旧证据答新问题，比慢更致命，所以判定是保守的三条件合取，拿不准一律 False。
+
+## 14. deep 预算：计划「单一 over_budget 粗判据」→ 实现工具/检索/LLM/时间四本账
+
+- **计划（原状）**：`deep_agent` 只有一个 `over_budget()` 粗判据，超限行为不细分。
+- **实现**：拆成四项独立计数与上限——`DEEP_TOOL_CALL_LIMIT`（工具调用 12）、`DEEP_RETRIEVAL_LIMIT`（检索 8）、`DEEP_LLM_CALL_LIMIT`（大模型 10）、时间账复用 `DEEP_TIMEOUT`（120s），均 ≤0 表示不限。任何一本先超限即**立即收敛到已有证据作答**（本步收手、跳过后续步骤、跳过综合生成；不抛异常、不空手结束）。`done` 事件 `meta` 新增 `budget` 字段（四项实际消耗 + 上限 + 超限项），metrics 新增 `qa_budget_metrics` 表记每次问答的平均消耗。
+- **原因**：四类消耗的增长速度完全不同——工具调用便宜但次数最容易膨胀，LLM 调用单次最贵，时间是用户可感知的硬约束。合成一个判据会出现「时间还没到但 LLM 已烧了 15 次」或反过来的漏判；分账后任一维先触顶都能止损，且 `meta.budget` 让超限项在前端/评测里可见，而不是静默截断。
+
+## 15. 账号停用：计划「无禁用机制」→ 实现 status 列 + 403 强制 + 注册不提权
+
+- **计划（原状）**：`users` 表没有状态列，注册接口信请求体字段。
+- **实现**：`history.users` 补 `status`（active/disabled）与 `role`（user/admin）两列，`ensure_schema` 里做 ALTER TABLE 兜底（老库自动补列，默认 active/user）。登录与所有鉴权接口：口令校验通过后再看状态，`disabled` 一律 403「账号已停用」（先验口令再查状态，不向未认证者泄露账号是否存在）；`optional_user` 把停用令牌按匿名处理，匿名问答不受影响。注册：`AuthRequest` 设 `extra="ignore"` 丢弃请求体里任何多余字段，`create_user` 硬编码 `status='active'`、`role='user'`——伪造 role/status/is_admin 到不了库里。后台新增 `/api/admin/users` 与 `/api/admin/users/{id}/status`（仅管理员，`AUTH_ADMIN_USERS` 白名单等价 `role=admin`），不能停用自己。
+- **原因**：停用是账号体系的最低配治理能力（离职/滥用账号要能立刻止血），没有它只能删库；而注册接口曾信任请求体字段，是教科书级的提权入口——**权限只能来自服务端**，请求体一律忽略比逐字段校验更不容易漏。先验口令后查状态是防账号枚举的常规取舍：403 文案明确但只对持正确口令者可见。
+
+## 16. 启动告警：计划「配错才知情」→ 实现模板默认值检查 + WARNING + health 字段
+
+- **计划（原状）**：`.env` 留着 `.env.example` 的示例值照常启动，没有任何提示。
+- **实现**：`config.template_default_keys()` 对照 `.env.example` 检查 `LLM_API_KEY` / `PG_PASSWORD` / `NEO4J_PASSWORD` / `TAVILY_API_KEY` / `ZHIPUAI_API_KEY` 是否仍等于模板值（含空值——没改过模板即命中；example 可注入便于测试）。`main` 在 `setup_logging` 之后执行，命中即 `logger.warning` 列出键名；**绝不拒绝启动**（本地演示优先）。`/api/health` 新增布尔字段 `template_default_risk`（同源判定，只新增不改已有字段），后台状态卡命中时展示醒目 `notice-warn`。
+- **原因**：示例密钥照常启动是典型的「本地能跑、上线即事故」隐患，但直接拒绝启动会把本地演示和离线测试一起挡在门外——告警的正确形态是**吵但不拦**。判定放进 health 是为了让风险可轮询、可被前端展示，而不是只存在于一次性的启动日志里。
