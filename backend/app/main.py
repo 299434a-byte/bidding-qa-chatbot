@@ -192,6 +192,7 @@ class _EventCollector:
         self.revision: list[str] = []
         self.done_mode: str | None = None
         self.error: str | None = None
+        self.confidence: float | None = None
 
     def feed(self, event: dict[str, Any]) -> None:
         etype = event.get("type")
@@ -252,6 +253,10 @@ class _EventCollector:
                 self.answer.append(text)
         elif etype == "error":
             self.error = event.get("message")
+        elif etype == "citation_check":
+            # 逐句可信度（纯新增字段）：没有就不动，保持 None
+            if event.get("confidence") is not None:
+                self.confidence = float(event["confidence"])
         elif etype == "done":
             self.done_mode = event.get("mode")
 
@@ -336,6 +341,7 @@ def health() -> dict[str, Any]:
         "agent_model": s.agent_model_or_default or None,
         "mysql_configured": s.mysql_configured,
         "kb_source": "postgres" if s.kb_source_is_postgres else "mysql",
+        "qdrant_mode": "server" if (s.qdrant_url or "").strip() else "local",
         "pg_configured": s.pg_configured,
         "pg_model": s.pg_model_or_default or None,
         "graph_configured": s.graph_configured,
@@ -367,7 +373,7 @@ def read_config(user: dict[str, Any] = Depends(auth.current_user)) -> dict[str, 
             "charset": s.mysql_charset,
         },
         "qdrant": {
-            "mode": "embedded-local",
+            "mode": "server" if (s.qdrant_url or "").strip() else "embedded-local",
             "collection": s.qdrant_collection,
         },
         "embedding": {"model": s.embed_model, "dim": s.embed_dim},
@@ -872,8 +878,12 @@ def _finalize_qa(
     rerank_applied: bool,
     rerank_failed: bool = False,
     rerank_skipped: bool = False,
+    confidence: float | None = None,
 ) -> None:
-    """问答收尾的统一动作：记一条指标 + 打一行日志（两个问答入口共用）。"""
+    """问答收尾的统一动作：记一条指标 + 打一行日志（两个问答入口共用）。
+
+    ``confidence`` 来自本轮 citation_check 事件的逐句可信度（没有则为 None，不入库均值）。
+    """
     elapsed_ms = (time.perf_counter() - started) * 1000
     metrics_store.record(
         mode=mode,
@@ -884,6 +894,7 @@ def _finalize_qa(
         rerank_applied=rerank_applied,
         rerank_failed=rerank_failed,
         rerank_skipped=rerank_skipped,
+        confidence=confidence,
         settings=settings,
     )
     logger.info(
@@ -957,6 +968,7 @@ def chat(
         rerank_applied = False
         rerank_failed = False
         rerank_skipped = False
+        confidence: float | None = None
 
         if cached is not None:
             yield _sse({"type": "cache_hit"})
@@ -991,6 +1003,10 @@ def chat(
                     rerank_applied = bool(meta.get("rerank_applied"))
                     rerank_failed = bool(meta.get("rerank_error"))
                     rerank_skipped = bool(meta.get("rerank_skipped"))
+                elif etype == "citation_check":
+                    # 引用校验事件携带逐句可信度（纯新增字段）：取出来供收尾落库
+                    if event.get("confidence") is not None:
+                        confidence = float(event["confidence"])
                 elif etype == "done":
                     done_mode = event.get("mode") or done_mode
                 yield _sse(event)
@@ -1015,6 +1031,7 @@ def chat(
             rerank_applied=rerank_applied,
             rerank_failed=rerank_failed,
             rerank_skipped=rerank_skipped,
+            confidence=confidence,
         )
         yield "data: [DONE]\n\n"
 
@@ -1240,6 +1257,7 @@ async def agent_chat(
             rerank_applied=collector.rerank_applied,
             rerank_failed=collector.rerank_failed,
             rerank_skipped=collector.rerank_skipped,
+            confidence=collector.confidence,
         )
 
         yield "data: [DONE]\n\n"

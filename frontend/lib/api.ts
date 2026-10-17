@@ -193,6 +193,12 @@ export type NumberCheck = {
   found: boolean;
 };
 
+/** 逐句幻觉标记：该句无支撑的原因（缺引用 / 数值在来源里找不到） */
+export type HallucinationFlag = {
+  sentence: string;
+  reason: "no_citation" | "number_no_source" | string;
+};
+
 export type ConversationEvent = {
   type: "conversation";
   id: string | null;
@@ -321,7 +327,18 @@ export type ChatEvent =
       results: WebSearchResult[];
       error?: string | null;
     }
-  | { type: "citation_check"; ok: boolean; issues: (string | CitationIssue)[]; number_checks?: NumberCheck[] };
+  | {
+      type: "citation_check";
+      ok: boolean;
+      issues: (string | CitationIssue)[];
+      number_checks?: NumberCheck[];
+      /** 逐句可信度（有支撑句数 ÷ 总句数）；旧后端可能没有这些新增字段 */
+      confidence?: number;
+      supported_sentences?: number;
+      total_sentences?: number;
+      unsupported_sentences?: number;
+      hallucination_flags?: HallucinationFlag[];
+    };
 
 export type ChatTurn = {
   role: "user" | "assistant";

@@ -52,7 +52,7 @@ from .rag import (
     retrieval_only_answer,
 )
 
-from .citation import strip_bad_refs, verify_citations
+from .citation import score_answer, strip_bad_refs, verify_citations
 
 from .rerank import rerank_hits
 
@@ -364,25 +364,34 @@ def _citation_check(
     answer_text: str,
     sources: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], str]:
-    """对累计正文做引用校验，返回（要追加的事件, 已校验文本）。"""
+    """对累计正文做引用校验，返回（要追加的事件, 已校验文本）。
+
+    校验通过也会产出一条 citation_check（纯新增字段携带逐句可信度
+    confidence / hallucination_flags；ok / issues / number_checks 语义不变），
+    校验失败时额外产出 channel=revision 的修订稿。
+    """
     if not sources:
         return [], answer_text
     try:
         check = verify_citations(answer_text, sources)
+        score = score_answer(answer_text, sources, check)
     except Exception:  # noqa: BLE001 - 校验失败绝不能把已经成功的问答搞挂
         return [], answer_text
-    if check.get("ok"):
-        return [], answer_text
-    revised = strip_bad_refs(answer_text, check.get("bad_refs") or [])
     events = [
         {
             "type": "citation_check",
-            "ok": False,
+            "ok": check.get("ok"),
             "issues": check.get("issues") or [],
             "number_checks": check.get("number_checks") or [],
-        },
-        {"type": "delta", "channel": "revision", "reason": "citation", "text": revised},
+            **score,
+        }
     ]
+    if check.get("ok"):
+        return events, answer_text
+    revised = strip_bad_refs(answer_text, check.get("bad_refs") or [])
+    events.append(
+        {"type": "delta", "channel": "revision", "reason": "citation", "text": revised}
+    )
     return events, revised
 
 

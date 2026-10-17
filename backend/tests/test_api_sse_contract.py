@@ -6,16 +6,18 @@
 #   这份顺序一旦漂移，界面就会「先出正文后出来源」「done 之后还在冒正文」。
 #   本文件用 TestClient 直接打 /api/chat 与 /api/agent/chat，把契约锁进测试：
 #     · /api/chat（真实 answer_events）：retrieval → sources → delta → done；
-#       引用校验失败时，done **之后**追加 revision + citation_check（rag.py 的既定设计：
-#       正文由 done 收尾，修订稿走独立通道，校验通过时一个额外事件都不发）。
+#       done **之后**追加 citation_check（rag.py 的既定设计：正文由 done 收尾，
+#       校验结论走补充通道；校验失败时先 revision 再 citation_check）。
+#       citation_check 无论通过/失败都发：事件新增 confidence / hallucination_flags
+#       等逐句可信度字段（纯新增），ok / issues / number_checks 的语义不变。
 #     · /api/agent/chat：conversation → 工具事件 → sources → delta → citation_check → revision → done
 #       （首个事件永远是 conversation——main.py 既有约定，先给前端会话 id 再流正文；
 #       Agent 通路里校验事件在 done **之前**发出，见 agent.py 注释「校验事件要在收尾之前」）。
 #   全部离线：检索与大模型用假实现顶掉，不连网、不连库。
 #
 # 【与「口口相传的契约」的两处差异（如实记录，不是笔误）】
-#   ① citation_check 只在「校验失败」时出现；校验通过时整条链路与改造前逐字节一致
-#      （这是硬性要求，见 rag.py / agent.py 注释），所以通过路径的序列里没有它。
+#   ① citation_check 通过时也出现（承载逐句可信度 confidence）；正文 delta 绝不
+#      出现在 done 之后——done 之后只允许补充类事件（revision / citation_check）。
 #   ② /api/chat 的修订事件在 done 之后（正文不可撤回，修订走补充通道）；
 #      /api/agent/chat 的修订事件在 done 之前（用户要求校验先于收尾）。
 # 两个接口各自的顺序都是「有意为之」，测试锁住的是各自的现状。
@@ -75,18 +77,27 @@ def _ask_chat(client: TestClient, question: str) -> list[dict]:
 # 用例 1：/api/chat 的事件顺序与字段（校验通过路径）
 # ----------------------------------------------------------------------------
 def test_chat_event_order_and_fields(monkeypatch) -> None:
-    """retrieval → sources → delta → done；各事件的必备字段必须齐全。"""
+    """retrieval → sources → delta → done → citation_check；各事件的必备字段必须齐全。"""
     _patch_rag(monkeypatch, "该项目预算为 1590 万元 [参考资料1]。")
     events = _ask_chat(TestClient(app), "项目预算多少？")
     types = [e["type"] for e in events]
 
-    # 顺序：先检索统计、再来源、再正文、最后收尾（done 必须是最后一个）。
+    # 顺序：先检索统计、再来源、再正文、再收尾；citation_check 是补充通道，只在 done 之后。
     assert types[0] == "retrieval"
     assert types[1] == "sources"
     assert "delta" in types
-    assert types[-1] == "done"
-    # 校验通过：不该出现任何 citation_check / revision 事件（行为与改造前一致）。
-    assert "citation_check" not in types
+    assert types[-1] == "citation_check"
+    assert types.index("done") < types.index("citation_check")
+    # 正文 delta 绝不追到 done 之后（补充通道只允许 revision / citation_check）。
+    last_delta = max(i for i, e in enumerate(events) if e["type"] == "delta")
+    assert last_delta < types.index("done")
+    # 校验通过：citation_check 仍然发出（承载逐句可信度），但没有 revision。
+    check = events[-1]
+    assert check["ok"] is True
+    assert check["issues"] == []
+    assert check["confidence"] == 1.0
+    assert check["hallucination_flags"] == []
+    assert "revision" not in types
 
     # 字段：前端渲染依赖它们，缺一个就会白屏/降级。
     retrieval = events[0]
@@ -97,7 +108,7 @@ def test_chat_event_order_and_fields(monkeypatch) -> None:
     # 正文 delta 必须带 text 字段。
     assert all("text" in e for e in events if e["type"] == "delta")
     # done 带 mode（前端据此显示徽标）。
-    assert events[-1]["mode"] == "llm"
+    assert events[types.index("done")]["mode"] == "llm"
 
 
 # ----------------------------------------------------------------------------

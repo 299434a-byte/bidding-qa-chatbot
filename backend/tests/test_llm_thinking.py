@@ -131,7 +131,7 @@ def test_astream_chat_routes_reasoning_to_callback(monkeypatch) -> None:
 # 用例 3：answer_events 事件流——thinking 在正文 delta 之前，正文不被污染，done 收尾
 # ----------------------------------------------------------------------------
 def test_answer_events_emits_thinking_before_delta_without_pollution(monkeypatch) -> None:
-    """思维链以 thinking 事件先发；delta 拼接结果不含思维链；done 是最后一个事件。"""
+    """思维链以 thinking 事件先发；delta 拼接结果不含思维链；done 之后只追加 citation_check。"""
     monkeypatch.setattr(
         rag_mod,
         "retrieve",
@@ -168,9 +168,11 @@ def test_answer_events_emits_thinking_before_delta_without_pollution(monkeypatch
     assert body == "该项目预算为 1590 万元 [参考资料1]。（回答结束）"
     assert "思维链" not in body
 
-    # done 收尾，且 done 之后不再有任何事件（引用校验通过时不追加修订）。
-    assert types[-1] == "done"
-    assert events[-1]["mode"] == "llm"
+    # done 收尾；done 之后只允许追加 citation_check（校验补充通道，携带逐句可信度），
+    # 不再有正文 / revision 事件。
+    assert types[-2:] == ["done", "citation_check"]
+    assert events[types.index("done")]["mode"] == "llm"
+    assert events[-1]["ok"] is True
 
 
 # ----------------------------------------------------------------------------

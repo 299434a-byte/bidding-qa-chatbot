@@ -4,7 +4,8 @@
 职责：
   - 调 retriever / rerank 得到证据块，组装带来源约束的系统提示词
   - 覆盖率闸门：检索块与问题关键词重合度不足时拒绝进入生成（防答非所问）
-  - 流式生成回答并做引用校验（检索无结果时输出 REF_1 标准文案）
+  - 流式生成回答并做引用校验（检索无结果时输出 REF_1 标准文案），
+    校验通过/失败都发 citation_check 事件，携带逐句可信度（confidence / hallucination_flags）
   - 渲染来源引用文本块
   - 追问复用：以上一问证据直接作答（reused_answer_events，跳过检索/规划）
 
@@ -26,7 +27,7 @@ from .rerank import rerank_hits
 
 from .retriever import RetrievalResult, retrieve, term_coverage
 
-from .citation import REF_1_RETRIEVAL_EMPTY, strip_bad_refs, verify_citations
+from .citation import REF_1_RETRIEVAL_EMPTY, score_answer, strip_bad_refs, verify_citations
 
 SYSTEM_PROMPT = """你是「招投标智能问答助手」，服务对象是招投标业务人员。
 
@@ -229,20 +230,29 @@ def _stream_generated_answer(
 
     yield {"type": "done", "mode": "llm", **(done_extra or {})}
 
-    try:
-        check = verify_citations("".join(answer_parts), sources)
-    except Exception:  # noqa: BLE001
-        check = None
+    if not sources:
+        # 没有来源就没有比对依据（如「跳过检索」的直答通道）：不校验、不发 citation_check。
+        return
 
-    if check is not None and not check.get("ok"):
-        revised = strip_bad_refs("".join(answer_parts), check.get("bad_refs") or [])
+    try:
+        full_answer = "".join(answer_parts)
+        check = verify_citations(full_answer, sources)
+        score = score_answer(full_answer, sources, check)
+    except Exception:  # noqa: BLE001
+        return
+
+    if not check.get("ok"):
+        revised = strip_bad_refs(full_answer, check.get("bad_refs") or [])
         yield {"type": "delta", "channel": "revision", "text": revised}
-        yield {
-            "type": "citation_check",
-            "ok": False,
-            "issues": check.get("issues") or [],
-            "number_checks": check.get("number_checks") or [],
-        }
+    # 校验通过也发 citation_check：事件新增 confidence / hallucination_flags 等逐句
+    # 可信度字段（纯新增），ok / issues / number_checks 的语义与取值保持不变。
+    yield {
+        "type": "citation_check",
+        "ok": check.get("ok"),
+        "issues": check.get("issues") or [],
+        "number_checks": check.get("number_checks") or [],
+        **score,
+    }
 
 
 def reused_answer_events(

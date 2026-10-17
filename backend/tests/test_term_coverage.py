@@ -170,8 +170,9 @@ def test_answer_events_pass_gate_and_generate_normally(monkeypatch) -> None:
 
     types = [ev["type"] for ev in events]
     assert "coverage_check" not in types
-    assert "delta" in types and types[-1] == "done"
-    assert events[-1]["mode"] == "llm"
+    # done 收尾，之后只追加校验通道的 citation_check（通过时携带逐句可信度）。
+    assert "delta" in types and types[-2:] == ["done", "citation_check"]
+    assert events[types.index("done")]["mode"] == "llm"
 
     retrieval = next(ev for ev in events if ev["type"] == "retrieval")
     assert retrieval["meta"]["coverage"] >= 0.45

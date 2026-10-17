@@ -4,10 +4,11 @@
 职责：
   - 校验回答中的 [N] 引用是否超出实际来源范围
   - 剔除无效引用序号（strip_bad_refs）
+  - 把校验结果聚合成逐句可信度分数（score_answer：confidence / hallucination_flags）
   - 维护四条标准拒答 / 兜底话术常量
 
 依赖：无
-被谁调用：rag（无数据文案与引用清洗）、agent（引用校验）
+被谁调用：rag（无数据文案与引用清洗、可信度评分）、agent / deep_agent（引用校验与可信度评分）
 """
 
 from __future__ import annotations
@@ -212,6 +213,102 @@ def verify_citations(answer: str, sources: list[dict[str, Any]]) -> dict[str, An
         "bad_refs": sorted(set(bad_refs)),
         "checked": len(unique_refs) + len(answer_numbers),
         "number_checks": number_checks,
+    }
+
+
+# 断句分隔符：中文句末标点（。！？；…）与换行；英文 .!?; 只有在不把数字拆开时才是断点
+# （「3.5 万元」不能被切成「3」和「5 万元」，所以 . 两侧不能都是数字）。
+_SENT_SPLIT_RE = re.compile(r"[。！？!?；;…\n\r]+|(?<!\d)\.(?!\d)")
+
+# _split_sentences 里引用编号占位符的回填模式（占位符本身不含任何标点，不会被断句切开）。
+_CITE_MASK_RE = re.compile(r"\x00(\d+)\x00")
+
+
+def _split_sentences(answer: str | None) -> list[str]:
+    """按中英文标点把回答切成句子；引用编号 ``[参考资料N]`` 内部不参与断句。
+
+    切分前先把引用编号整段换成占位符、切完再换回来，保证标记完整地留在
+    它所在的句子里。切出来为空白的片段直接丢弃；空回答返回空列表。
+    """
+    text = answer or ""
+    if not text.strip():
+        return []
+    spans: list[str] = []
+
+    def _mask(m: re.Match[str]) -> str:
+        spans.append(m.group(0))
+        return f"\x00{len(spans) - 1}\x00"
+
+    masked = _CITE_RE.sub(_mask, text)
+    sentences: list[str] = []
+    for part in _SENT_SPLIT_RE.split(masked):
+        restored = _CITE_MASK_RE.sub(lambda mm: spans[int(mm.group(1))], part).strip()
+        if restored:
+            sentences.append(restored)
+    return sentences
+
+
+def score_answer(
+    answer: str,
+    sources: list[dict[str, Any]],
+    verify_result: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """把 :func:`verify_citations` 的结果聚合成「逐句可信度」分数（纯函数，不抛异常）。
+
+    判定口径（一句话要同时满足两条才算「有支撑」）：
+      1. 句内有指向真实来源的引用编号（在 ``1..len(sources)`` 内且未被校验判为越界）；
+      2. 句内的金额 / 百分比 / 日期都能在来源里逐字命中（复用 verify 的 number_checks 结论）。
+
+    返回 ``confidence`` = 有支撑句数 ÷ 总句数；空回答（没有句子）时返回
+    ``confidence=0.0``（不除零）。``hallucination_flags`` 逐句给出无支撑原因：
+    ``no_citation``（缺引用）或 ``number_no_source``（数值在来源里找不到）。
+    """
+    sources = list(sources or [])
+    verify = verify_result if isinstance(verify_result, dict) else {}
+    bad_refs = {int(n) for n in (verify.get("bad_refs") or [])}
+
+    # 比对基准与 verify_citations 同口径：优先「被引用到的真实来源」，
+    # 整个回答没有任何有效引用时退回全部来源（数值层面仍按来源核对）。
+    cited_valid = sorted(
+        {n for n in _extract_refs(answer) if 1 <= n <= len(sources) and n not in bad_refs}
+    )
+    basis_sources = [sources[n - 1] for n in cited_valid] if cited_valid else sources
+    basis: set[float | str] = set()
+    for src in basis_sources:
+        basis |= _source_numbers(src)
+
+    # verify 的 number_checks 已按写法去重并给出 found 结论：同写法直接复用，
+    # 保证 score 与 issues / 前端数字标记三者口径一致。
+    found_by_text = {
+        str(entry.get("text")): bool(entry.get("found"))
+        for entry in (verify.get("number_checks") or [])
+        if isinstance(entry, dict) and entry.get("text") is not None
+    }
+
+    sentences = _split_sentences(answer)
+    supported = 0
+    flags: list[dict[str, str]] = []
+    for sentence in sentences:
+        has_citation = any(
+            1 <= n <= len(sources) and n not in bad_refs for n in _extract_refs(sentence)
+        )
+        numbers = _number_checks(_CITE_RE.sub(" ", sentence), basis)
+        numbers_ok = all(
+            found_by_text.get(entry["text"], entry["found"]) for entry in numbers
+        )
+        if has_citation and numbers_ok:
+            supported += 1
+            continue
+        reason = "no_citation" if not has_citation else "number_no_source"
+        flags.append({"sentence": sentence, "reason": reason})
+
+    total = len(sentences)
+    return {
+        "confidence": (supported / total) if total else 0.0,
+        "supported_sentences": supported,
+        "total_sentences": total,
+        "hallucination_flags": flags,
+        "unsupported_sentences": len(flags),
     }
 
 

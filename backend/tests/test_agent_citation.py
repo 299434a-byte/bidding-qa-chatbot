@@ -7,7 +7,9 @@
 #   本文件验证 agent.py 里抽出的辅助函数 _citation_check：
 #     ① react 通路的「累计正文」会跑校验；
 #     ② 校验失败时产出 citation_check + revision 两条事件；
-#     ③ 校验通过 / 无来源 / 校验器异常时，不产出任何额外事件（行为一字不差）。
+#     ③ 校验通过时产出一条携带逐句可信度（confidence 等新增字段）的 citation_check，
+#        正文一字不差、没有修订稿；
+#     ④ 无来源 / 校验器异常时，不产出任何额外事件（行为一字不差）。
 #   测试全部用「假 sources」直接调这个纯函数，**不连大模型、不连数据库**。
 # ============================================================================
 
@@ -51,17 +53,28 @@ def test_agent_citation_failure_emits_revision_and_check():
 
 
 # ----------------------------------------------------------------------------
-# 用例 2：校验通过时，不产出任何额外事件，且文本一字不差
+# 用例 2：校验通过时，产出一条携带逐句可信度的 citation_check，正文一字不差
 # ----------------------------------------------------------------------------
-def test_agent_citation_pass_emits_nothing_and_is_byte_identical():
-    """校验通过时必须「一个事件都不发」，累计正文原样返回（行为一字不差）。"""
-    # 【设计意图】硬性要求：校验通过时整条链路的行为与改造前完全一致。
-    #   「1590.0 万元」与「1590 万元」是同一金额的不同写法，必须判为通过（防误杀）。
+def test_agent_citation_pass_emits_check_with_confidence_and_is_byte_identical():
+    """校验通过时发一条 citation_check（ok=True + confidence 等新增字段），不发修订稿。"""
+    # 【设计意图】契约更新：citation_check 校验通过时也要发——它现在同时承载
+    #   逐句可信度（confidence / hallucination_flags），前端与指标侧需要看到
+    #   「这句有依据」的结论，而不只是出问题时的清单。
+    #   既有字段语义不变：ok=True、issues 为空；「1590 万元」与「1590.0 万元」
+    #   是同一金额的不同写法，必须判为通过（防误杀）；正文一字不差、没有修订稿。
     answer = "该项目的预算金额为 1590 万元 [参考资料1]。"
 
     events, revised = _citation_check(answer, FAKE_SOURCES)
 
-    assert events == []
+    assert len(events) == 1
+    check = events[0]
+    assert check["type"] == "citation_check"
+    assert check["ok"] is True
+    assert check["issues"] == []
+    assert check["confidence"] == 1.0
+    assert check["total_sentences"] == 1
+    assert check["supported_sentences"] == 1
+    assert check["hallucination_flags"] == []
     assert revised == answer  # 逐字节一致
 
 

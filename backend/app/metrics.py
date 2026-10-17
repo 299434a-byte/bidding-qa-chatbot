@@ -1,8 +1,8 @@
-"""metrics：问答可观测性指标（SQLite 落盘：耗时、缓存命中、重排统计）。
+"""metrics：问答可观测性指标（SQLite 落盘：耗时、缓存命中、重排统计、可信度）。
 
 职责：
-  - 记录每次问答的总耗时、首 token、模式、重排结果
-  - 汇总为 /api/metrics 的均值 / 中位数 / 命中率
+  - 记录每次问答的总耗时、首 token、模式、重排结果、逐句可信度
+  - 汇总为 /api/metrics 的均值 / 中位数 / 命中率 / avg_confidence
   - 事件计数（qa_event_counters：如 forced_finalize 强制收口触发次数）
   - 写失败静默降级（不影响问答）
 
@@ -109,6 +109,11 @@ def _ensure_schema(conn: sqlite3.Connection, path: Path) -> None:
             )
         except Exception:
             pass
+        try:
+            # 逐句可信度（0~1 的浮点；NULL = 本轮没有 citation_check 事件，不参与均值）。
+            conn.execute("ALTER TABLE qa_metrics ADD COLUMN confidence REAL")
+        except Exception:
+            pass
         conn.commit()
         _schema_ready.add(key)
 
@@ -128,9 +133,14 @@ def record(
     rerank_applied: bool = False,
     rerank_failed: bool = False,
     rerank_skipped: bool = False,
+    confidence: float | None = None,
     settings: Settings | None = None,
 ) -> bool:
-    """记一条问答指标。成功返回 ``True``；任何失败静默返回 ``False``。"""
+    """记一条问答指标。成功返回 ``True``；任何失败静默返回 ``False``。
+
+    ``confidence`` 是本轮 citation_check 事件里的逐句可信度（0~1）；
+    传 ``None`` 表示本轮没有可信度结论（如缓存命中 / 直答通道），不参与均值。
+    """
     s = settings or get_settings()
     try:
         with _connect(s) as conn:
@@ -138,8 +148,8 @@ def record(
             conn.execute(
                 "INSERT INTO qa_metrics "
                 "(mode, elapsed_ms, first_token_ms, sources_count, cache_hit, "
-                "rerank_applied, rerank_failed, rerank_skipped, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "rerank_applied, rerank_failed, rerank_skipped, confidence, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     mode or "llm",
                     max(0.0, float(elapsed_ms or 0.0)),
@@ -149,6 +159,7 @@ def record(
                     1 if rerank_applied else 0,
                     1 if rerank_failed else 0,
                     1 if rerank_skipped else 0,
+                    None if confidence is None else round(float(confidence), 6),
                     _now_iso(),
                 ),
             )
@@ -235,6 +246,8 @@ def summary(settings: Settings | None = None) -> dict[str, Any]:
         "rerank_failed": 0,
         "rerank_skipped": 0,
         "rerank_success_rate": 0.0,
+        "avg_confidence": 0.0,
+        "low_confidence_count": 0,
         "forced_finalize": 0,
         "coverage_refused": 0,
         "coverage_pass": 0,
@@ -253,7 +266,9 @@ def summary(settings: Settings | None = None) -> dict[str, Any]:
                 "COALESCE(SUM(cache_hit), 0) AS hits, "
                 "COALESCE(SUM(rerank_applied), 0) AS reranks, "
                 "COALESCE(SUM(rerank_failed), 0) AS rerank_fails, "
-                "COALESCE(SUM(rerank_skipped), 0) AS rerank_skips "
+                "COALESCE(SUM(rerank_skipped), 0) AS rerank_skips, "
+                "COALESCE(AVG(CASE WHEN confidence IS NOT NULL THEN confidence END), 0) AS avg_conf, "
+                "COALESCE(SUM(CASE WHEN confidence IS NOT NULL AND confidence < 0.5 THEN 1 ELSE 0 END), 0) AS low_conf "
                 "FROM qa_metrics"
             ).fetchone()
             mode_rows = conn.execute(
@@ -313,6 +328,9 @@ def summary(settings: Settings | None = None) -> dict[str, Any]:
             "rerank_failed": rerank_fails,
             "rerank_skipped": int(row["rerank_skips"] or 0),
             "rerank_success_rate": rerank_success_rate,
+            # 平均逐句可信度（只统计有 citation_check 结论的问答）+ 低可信（<0.5）次数
+            "avg_confidence": round(float(row["avg_conf"] or 0.0), 4),
+            "low_confidence_count": int(row["low_conf"] or 0),
             "forced_finalize": counters.get("forced_finalize", 0),
             "coverage_refused": counters.get("coverage_refused", 0),
             "coverage_pass": counters.get("coverage_pass", 0),

@@ -8,6 +8,7 @@ import { formatHm } from "@/lib/timefmt";
 import type {
   CitationIssue,
   GraphQueryInfo,
+  HallucinationFlag,
   NumberCheck,
   PlanStep,
   PlanStepRun,
@@ -60,6 +61,11 @@ export type Message = {
   citationIssues?: (string | CitationIssue)[];
   /** 数字逐字命中明细（citation_check 事件带来；found=false 的在正文里加醒目标记） */
   numberChecks?: NumberCheck[];
+  /** 逐句可信度（citation_check 事件带来：有支撑句数 ÷ 总句数；没有则不渲染徽标） */
+  confidence?: number;
+  supportedSentences?: number;
+  totalSentences?: number;
+  hallucinationFlags?: HallucinationFlag[];
   revisionByCitation?: boolean;
   adoptedVersion?: "v1" | "v2";
   mode?: string;
@@ -383,6 +389,27 @@ function MessageBubble({ msg, highlighted, busy, onFillInput, onAdopt, onOpenEvi
                     <li key={i}>{typeof issue === "string" ? issue : issue.message ?? "引用校验发现问题"}</li>
                   ))}
                 </ul>
+              </div>
+            )}
+
+            {/* 逐句可信度徽标（citation_check 新增字段；流式期间不闪烁，旧后端没有该字段就不渲染） */}
+            {typeof msg.confidence === "number" && !msg.streaming && (
+              <div className="adopted-tag">
+                <span
+                  className={`badge ${
+                    msg.confidence >= 0.8 ? "badge-mint" : msg.confidence >= 0.5 ? "badge-plain" : "badge-warn"
+                  }`}
+                >
+                  可信度 {Math.round(msg.confidence * 100)}%
+                </span>
+                {typeof msg.totalSentences === "number" && msg.totalSentences > 0 && (
+                  <span className="badge badge-plain">
+                    {msg.supportedSentences ?? 0}/{msg.totalSentences} 句有依据
+                  </span>
+                )}
+                {(msg.hallucinationFlags?.length ?? 0) > 0 && (
+                  <span className="badge badge-warn">{msg.hallucinationFlags!.length} 句无支撑</span>
+                )}
               </div>
             )}
 
