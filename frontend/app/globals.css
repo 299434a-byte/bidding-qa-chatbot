@@ -679,6 +679,30 @@ a {
   border-color: var(--neutral-400);
 }
 
+/* 左侧导航：长期记忆入口（登录后才显示） */
+.rail-links {
+  padding-top: var(--sp-8);
+  margin-top: var(--sp-8);
+  border-top: 1px dashed var(--neutral-200);
+}
+
+.rail-link {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-8);
+  padding: var(--sp-8) var(--sp-8);
+  border-radius: var(--r-6);
+  font-size: var(--text-13);
+  color: var(--neutral-600);
+  text-decoration: none;
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+
+.rail-link:hover {
+  background: var(--interact-hover);
+  color: var(--neutral-900);
+}
+
 .brand {
   display: flex;
   align-items: center;
@@ -1529,6 +1553,127 @@ button.cite:active {
   display: flex;
   flex-wrap: wrap;
   gap: var(--sp-8);
+}
+
+/* ---------------- 长期记忆看板（/memory） ---------------- */
+.memory-empty {
+  font-size: var(--text-13);
+  color: var(--neutral-400);
+}
+
+/* 实体标签云：字号随提及次数放大 */
+.memory-cloud {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-8) var(--sp-12);
+  align-items: baseline;
+}
+
+.memory-tag {
+  color: var(--neutral-900);
+  line-height: 1.3;
+  cursor: default;
+}
+
+.memory-tag em {
+  font-style: normal;
+  font-size: var(--text-12);
+  color: var(--primary-500);
+  margin-left: 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 主题频次条 */
+.memory-bars {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-8);
+}
+
+.memory-bar-row {
+  display: grid;
+  grid-template-columns: minmax(72px, auto) 1fr auto;
+  align-items: center;
+  gap: var(--sp-8);
+}
+
+.memory-bar-name {
+  font-size: var(--text-13);
+  color: var(--neutral-600);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 120px;
+}
+
+.memory-bar-track {
+  height: 8px;
+  background: var(--neutral-100);
+  border-radius: var(--r-10);
+  overflow: hidden;
+}
+
+.memory-bar-fill {
+  height: 100%;
+  background: var(--primary-500);
+  border-radius: var(--r-10);
+}
+
+.memory-bar-count {
+  font-size: var(--text-12);
+  color: var(--neutral-400);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 最近提问时间线 */
+.memory-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-8);
+}
+
+.memory-timeline-row {
+  display: flex;
+  gap: var(--sp-12);
+  align-items: baseline;
+  font-size: var(--text-13);
+  border-bottom: 1px dashed var(--neutral-200);
+  padding-bottom: var(--sp-8);
+}
+
+.memory-timeline-row:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.memory-timeline-ts {
+  flex: none;
+  color: var(--neutral-400);
+  font-family: var(--font-mono);
+  font-size: var(--text-12);
+  font-variant-numeric: tabular-nums;
+}
+
+.memory-timeline-q {
+  color: var(--neutral-900);
+}
+
+.memory-summary {
+  margin-top: var(--sp-12);
+  font-size: var(--text-13);
+  color: var(--neutral-600);
+}
+
+.memory-summary pre {
+  margin-top: var(--sp-8);
+  padding: var(--sp-8) var(--sp-12);
+  background: var(--neutral-50);
+  border: 1px solid var(--neutral-200);
+  border-radius: var(--r-10);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: var(--text-12);
 }
 
 .plan-list {

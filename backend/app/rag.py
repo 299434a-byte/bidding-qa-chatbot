@@ -186,8 +186,15 @@ def render_reference_blocks(sources: list[dict[str, Any]]) -> str:
     return "\n\n".join(blocks)
 
 
-def build_messages(question: str, sources: list[dict[str, Any]]) -> list[dict[str, str]]:
-    """把命中的原文拼成上下文，交给大模型。"""
+def build_messages(
+    question: str, sources: list[dict[str, Any]], memory_text: str = ""
+) -> list[dict[str, str]]:
+    """把命中的原文拼成上下文，交给大模型。
+
+    ``memory_text`` 是长期记忆摘要（≤500 字），拼在 system prompt 末尾：
+    只帮模型理解用户关注点，**不占引用位、不算来源**（参考资料编号从 1 起不受影响）。
+    为空时行为与改动前完全一致。
+    """
     context = render_reference_blocks(sources) or "（无）"
 
     user_content = (
@@ -195,8 +202,11 @@ def build_messages(question: str, sources: list[dict[str, Any]]) -> list[dict[st
         f"【用户问题】\n{question}\n\n"
         "请严格依据上述参考资料作答，并在引用处标注 [参考资料N]。"
     )
+    system = SYSTEM_PROMPT
+    if memory_text:
+        system = f"{system}\n\n{memory_text}"
     return [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": system},
         {"role": "user", "content": user_content},
     ]
 
@@ -279,6 +289,7 @@ def answer_events(
     question: str,
     settings: Settings | None = None,
     final_k: int | None = None,
+    memory_text: str = "",
 ) -> Iterator[dict[str, Any]]:
     """完整的问答事件流。"""
     s = settings or get_settings()
@@ -367,7 +378,9 @@ def answer_events(
 
     metrics_store.bump("coverage_pass", settings=s)
 
-    yield from _stream_generated_answer(question, sources, s, phase_timings=phase_timings)
+    yield from _stream_generated_answer(
+        question, sources, s, phase_timings=phase_timings, memory_text=memory_text
+    )
 
 
 def _stream_generated_answer(
@@ -377,6 +390,7 @@ def _stream_generated_answer(
     *,
     done_extra: dict[str, Any] | None = None,
     phase_timings: dict[str, Any] | None = None,
+    memory_text: str = "",
 ) -> Iterator[dict[str, Any]]:
     """对**已确定的来源**流式生成答案（完整链路与追问复用链路共用）。
 
@@ -406,7 +420,9 @@ def _stream_generated_answer(
             yield {"type": "thinking", "delta": thinking_parts.pop(0)}
 
     try:
-        for piece in stream_chat(build_messages(question, sources), s, on_thinking=_on_thinking):
+        for piece in stream_chat(
+            build_messages(question, sources, memory_text), s, on_thinking=_on_thinking
+        ):
             yield from _drain_thinking()
             answer_parts.append(piece)
             yield {"type": "delta", "text": piece}
@@ -451,6 +467,7 @@ def reused_answer_events(
     question: str,
     sources: list[dict[str, Any]],
     settings: Settings | None = None,
+    memory_text: str = "",
 ) -> Iterator[dict[str, Any]]:
     """追问复用链路：跳过检索与规划，直接以上一问证据流式作答。
 
@@ -475,4 +492,6 @@ def reused_answer_events(
         yield {"type": "delta", "text": retrieval_only_answer(sources)}
         yield {"type": "done", "mode": "retrieval_only", "reused": True}
         return
-    yield from _stream_generated_answer(question, sources, s, done_extra={"reused": True})
+    yield from _stream_generated_answer(
+        question, sources, s, done_extra={"reused": True}, memory_text=memory_text
+    )

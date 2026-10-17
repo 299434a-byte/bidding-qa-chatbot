@@ -404,9 +404,16 @@ def _build_messages(
     question: str,
     history: list[dict[str, Any]] | None,
     s: Settings,
+    memory_text: str = "",
 ) -> list[Any]:
-    """把历史对话与当前问题组装成 LangChain 消息列表。"""
+    """把历史对话与当前问题组装成 LangChain 消息列表。
+
+    ``memory_text`` 是长期记忆摘要，**按请求**以一条 SystemMessage 置于最前——
+    绝不写进 ``_build_agent`` 的缓存 prompt（那会把 A 用户的记忆带给 B 用户）。
+    """
     messages: list[Any] = []
+    if memory_text:
+        messages.append(SystemMessage(content=memory_text))
     for turn in _trim_history(history, s.agent_history_turns):
         role = str(turn.get("role") or "")
         content = str(turn.get("content") or "").strip()
@@ -695,13 +702,14 @@ async def _forced_finalize_stream(
     turn: dict[str, Any],
     *,
     use_web: bool,
+    memory_text: str = "",
 ) -> AsyncIterator[dict[str, Any]]:
     """强制收口轮：禁止工具调用，基于已重放的工具观察流式产出最终文字答案。
 
     产出 thinking / delta 两类事件（收口轮的思维链同样单独一路下发）。
     """
     messages: list[Any] = [SystemMessage(content=_agent_system_prompt(s, web_search_enabled=use_web))]
-    messages.extend(_build_messages(question, history, s))
+    messages.extend(_build_messages(question, history, s, memory_text))
     messages.extend(_prune_transcript(turn.get("transcript") or []))
 
     model = _make_chat_model(s).bind_tools(_collect_tools(s, use_web), tool_choice="none")
@@ -721,6 +729,7 @@ async def agent_events(
     history: list[dict[str, Any]] | None = None,
     web_search: bool | None = None,
     mode: str = "react",
+    memory_text: str = "",
 ) -> AsyncIterator[dict[str, Any]]:
     """Agent 问答事件流（异步生成器）。"""
     mode = (mode or "react").strip().lower()
@@ -735,7 +744,7 @@ async def agent_events(
         return
 
     if not s.agent_configured:
-        for event in answer_events(question, settings=s, final_k=final_k):
+        for event in answer_events(question, settings=s, final_k=final_k, memory_text=memory_text):
             yield event
         return
 
@@ -748,6 +757,7 @@ async def agent_events(
             final_k=final_k,
             mode=mode,
             web_search=web_search,
+            memory_text=memory_text,
         ):
             yield event
         return
@@ -768,7 +778,7 @@ async def agent_events(
         sources = state.get("sources") or []
         yield {"type": "delta", "text": ""}
         try:
-            for piece in stream_chat(build_messages(question, sources), s):
+            for piece in stream_chat(build_messages(question, sources, memory_text), s):
                 yield {"type": "delta", "text": piece}
         except LLMError as inner:
             yield {"type": "error", "message": str(inner)}
@@ -783,7 +793,7 @@ async def agent_events(
         last_tool_at = time.perf_counter()
         async for event in _stream_react_turn(
             agent,
-            {"messages": _build_messages(question, history, s)},
+            {"messages": _build_messages(question, history, s, memory_text)},
             turn,
             states,
             question=question,
@@ -804,7 +814,7 @@ async def agent_events(
         emitted = ""
         try:
             async for event in _forced_finalize_stream(
-                s, question, history, turn, use_web=use_web
+                s, question, history, turn, use_web=use_web, memory_text=memory_text
             ):
                 if event.get("type") == "delta":
                     piece = str(event.get("text") or "")

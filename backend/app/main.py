@@ -34,6 +34,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from . import auth, history as history_store
+from . import memory as memory_store
 from . import ratelimit
 from .clarify import needs_clarification
 from .agent import MODES, TOOL_NAME, agent_events
@@ -383,6 +384,8 @@ def health() -> dict[str, Any]:
         "vision_configured": s.vision_configured,
         "history_enabled": s.history_enabled,
         "history_configured": s.history_configured,
+        "memory_enabled": s.memory_enabled,
+        "memory_configured": s.memory_configured,
         "auth_enabled": s.auth_enabled,
         "modes": list(MODES),
         "index": store_stats,
@@ -787,6 +790,38 @@ async def history_search(
     return {"items": items, "total": total, "limit": page, "offset": offset, "fts": history_store.fts_available(s)}
 
 
+@app.get("/api/memory")
+async def memory_profile(
+    user: dict[str, Any] = Depends(auth.current_user),
+) -> dict[str, Any]:
+    """长期记忆画像：关注实体 / 主题频次 + 最近提问时间线（只看自己那份）。"""
+    s = get_settings()
+    if not s.memory_configured:
+        raise HTTPException(status_code=503, detail="长期记忆未启用（需同时开启 MEMORY_ENABLED 与 AUTH_ENABLED）")
+    try:
+        profile = await asyncio.to_thread(memory_store.get_profile, user["id"], s)
+    except Exception as exc:  # noqa: BLE001 - 画像读失败给 503，不给 500
+        logger.warning("长期记忆画像读取失败 user=%s err=%s", user["id"], exc)
+        raise HTTPException(status_code=503, detail=f"长期记忆暂不可用：{exc}") from exc
+    return {"profile": profile, "summary": await asyncio.to_thread(memory_store.summary_text, user["id"], s)}
+
+
+@app.delete("/api/memory")
+async def memory_clear(
+    user: dict[str, Any] = Depends(auth.current_user),
+) -> dict[str, Any]:
+    """清空当前用户的长期记忆画像。"""
+    s = get_settings()
+    if not s.memory_configured:
+        raise HTTPException(status_code=503, detail="长期记忆未启用（需同时开启 MEMORY_ENABLED 与 AUTH_ENABLED）")
+    try:
+        await asyncio.to_thread(memory_store.clear_profile, user["id"], s)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("长期记忆清空失败 user=%s err=%s", user["id"], exc)
+        raise HTTPException(status_code=503, detail=f"长期记忆暂不可用：{exc}") from exc
+    return {"cleared": True}
+
+
 @app.post("/analyze-image")
 async def analyze_image(
     file: UploadFile = File(..., description="待解析的图片（jpg / png / webp；大小上限见配置 VISION_MAX_BYTES，默认 10MB）"),
@@ -897,6 +932,17 @@ def _sse(event: dict[str, Any]) -> str:
     return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
 
+def _memory_summary(user: dict[str, Any] | None, s: Settings) -> str:
+    """取当前用户的长期记忆摘要；未登录 / 未配置 / 任何异常都返回空串（链路照旧）。"""
+    if not user or not s.memory_configured:
+        return ""
+    try:
+        return memory_store.summary_text(user["id"], s)
+    except Exception as exc:  # noqa: BLE001 - 记忆只做增强，失败绝不影响问答
+        logger.warning("长期记忆摘要读取失败 user=%s err=%s（已跳过注入）", user.get("id"), exc)
+        return ""
+
+
 def _finalize_qa(
     *,
     settings: Settings,
@@ -911,12 +957,16 @@ def _finalize_qa(
     rerank_skipped: bool = False,
     confidence: float | None = None,
     parallel_tools: int = 0,
+    user: dict[str, Any] | None = None,
 ) -> None:
-    """问答收尾的统一动作：记一条指标 + 打一行日志（两个问答入口共用）。
+    """问答收尾的统一动作：记一条指标 + 打一行日志 + 沉淀一条长期记忆（两个问答入口共用）。
 
     ``confidence`` 来自本轮 citation_check 事件的逐句可信度（没有则为 None，不入库均值）。
     ``parallel_tools`` 来自 Agent 通路 done 事件里的单轮最大并行工具数（纯 RAG 通路恒 0）。
     """
+    if user and settings.memory_configured:
+        # 问答后再记一笔（record_qa 内部吞错 + warning，绝不影响主链路）
+        memory_store.record_qa(user["id"], question, settings)
     elapsed_ms = (time.perf_counter() - started) * 1000
     metrics_store.record(
         mode=mode,
@@ -975,6 +1025,7 @@ def chat(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     request_started = time.perf_counter()
     logged_in = bool(user)
+    memory_text = _memory_summary(user, s)
     # 指定模型的请求不吃默认模型的缓存（缓存键不含模型，共用会串答案），也不写入。
     model_override = bool((payload.model or "").strip())
     cacheable = (not model_override) and answer_cache.is_cacheable(
@@ -1018,12 +1069,15 @@ def chat(
                 sources_count=len(cached.get("sources") or []),
                 cache_hit=True,
                 rerank_applied=False,
+                user=user,
             )
             yield "data: [DONE]\n\n"
             return
 
         try:
-            for event in answer_events(payload.question, settings=s, final_k=payload.top_k):
+            for event in answer_events(
+                payload.question, settings=s, final_k=payload.top_k, memory_text=memory_text
+            ):
                 etype = event.get("type")
                 if etype == "delta":
                     if (event.get("channel") or "answer") != "revision":
@@ -1066,6 +1120,7 @@ def chat(
             rerank_failed=rerank_failed,
             rerank_skipped=rerank_skipped,
             confidence=confidence,
+            user=user,
         )
         yield "data: [DONE]\n\n"
 
@@ -1103,6 +1158,7 @@ async def agent_chat(
     clarify_needed = bool(clarify.get("needed"))
 
     request_started = time.perf_counter()
+    memory_text = _memory_summary(user, s)
     use_web = s.web_search_default if payload.web_search is None else bool(payload.web_search)
     use_web = bool(use_web and s.web_search_configured)
     # 指定模型的请求不吃默认模型的缓存（缓存键不含模型，共用会串答案），也不写入。
@@ -1228,6 +1284,7 @@ async def agent_chat(
                 sources_count=len(cached.get("sources") or []),
                 cache_hit=True,
                 rerank_applied=False,
+                user=user,
             )
             yield "data: [DONE]\n\n"
             return
@@ -1248,7 +1305,11 @@ async def agent_chat(
         try:
             if reused_sources is not None:
                 metrics_store.bump("followup_reused", settings=s)
-                iterator = iter(reused_answer_events(payload.question, reused_sources, settings=s))
+                iterator = iter(
+                    reused_answer_events(
+                        payload.question, reused_sources, settings=s, memory_text=memory_text
+                    )
+                )
                 while True:
                     event = await asyncio.to_thread(next, iterator, None)
                     if event is None:
@@ -1272,6 +1333,7 @@ async def agent_chat(
                     history=history,
                     web_search=payload.web_search,
                     mode=mode,
+                    memory_text=memory_text,
                 ):
                     collector.feed(event)
                     if (
@@ -1333,6 +1395,7 @@ async def agent_chat(
             rerank_skipped=collector.rerank_skipped,
             confidence=collector.confidence,
             parallel_tools=collector.parallel_tools,
+            user=user,
         )
 
         yield "data: [DONE]\n\n"

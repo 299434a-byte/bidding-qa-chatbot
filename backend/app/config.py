@@ -208,6 +208,9 @@ class Settings:
     history_title_max_chars: int
     history_max_message_chars: int
 
+    memory_enabled: bool
+    memory_dir: Path
+
     auth_enabled: bool
     auth_token_ttl_days: int
     auth_pbkdf2_iterations: int
@@ -300,6 +303,11 @@ class Settings:
     def history_configured(self) -> bool:
         """对话历史可用需同时开启「历史存储」与「账号体系」——历史按用户分区，没有用户就没法隔离。"""
         return bool(self.history_enabled and self.auth_enabled)
+
+    @property
+    def memory_configured(self) -> bool:
+        """长期记忆按用户分区存文件，必须有账号体系才能认出「这是谁的记忆」。"""
+        return bool(self.memory_enabled and self.auth_enabled)
 
     def label_of(self, table: str) -> str:
         return self.table_labels.get(table, table)
@@ -415,6 +423,8 @@ def _build_settings() -> Settings:
         history_search_limit=_int("HISTORY_SEARCH_LIMIT", 20),
         history_title_max_chars=_int("HISTORY_TITLE_MAX_CHARS", 30),
         history_max_message_chars=_int("HISTORY_MAX_MESSAGE_CHARS", 20000),
+        memory_enabled=_bool("MEMORY_ENABLED", True),
+        memory_dir=_path("MEMORY_DIR", "./data/memory"),
         auth_enabled=_bool("AUTH_ENABLED", True),
         auth_token_ttl_days=_int("AUTH_TOKEN_TTL_DAYS", 30),
         auth_pbkdf2_iterations=_int("AUTH_PBKDF2_ITERATIONS", 200000),

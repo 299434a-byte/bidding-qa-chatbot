@@ -221,6 +221,7 @@ def _solve_messages(
     steps: list[dict[str, str]],
     observations: list[str],
     sources: list[dict[str, Any]],
+    memory_text: str = "",
 ) -> list[dict[str, str]]:
     plan_text = "\n".join(f"{i}. {st['title']}：{st['detail']}" for i, st in enumerate(steps, start=1))
     obs_text = (
@@ -236,8 +237,10 @@ def _solve_messages(
         "请综合上述信息，给出完整、准确、结构化的最终回答。"
         "严格依据参考资料，引用处标注 [参考资料N]，不要编造任何资料之外的信息。"
     )
+    # 长期记忆摘要拼在 system 末尾：只帮理解用户关注点，不占引用位、不算来源。
+    system = f"{SYSTEM_PROMPT}\n\n{memory_text}" if memory_text else SYSTEM_PROMPT
     return [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": system},
         {"role": "user", "content": user_content},
     ]
 
@@ -294,6 +297,7 @@ async def run_deep_events(
     final_k: int | None = None,
     mode: str = "plan",
     web_search: bool | None = None,
+    memory_text: str = "",
 ) -> AsyncIterator[dict[str, Any]]:
     """Plan-and-Solve（+ Reflection）事件流。
 
@@ -304,7 +308,9 @@ async def run_deep_events(
     started = time.monotonic()
     budget = _Budget(s, started)
     try:
-        async for event in _stream_deep_events(question, s, final_k, mode, web_search, budget):
+        async for event in _stream_deep_events(
+            question, s, final_k, mode, web_search, budget, memory_text
+        ):
             yield event
     finally:
         metrics_store.record_budget(
@@ -325,6 +331,7 @@ async def _stream_deep_events(
     mode: str,
     web_search: bool | None,
     budget: _Budget,
+    memory_text: str = "",
 ) -> AsyncIterator[dict[str, Any]]:
     """Plan-and-Solve（+ Reflection）事件流本体（预算记账由 run_deep_events 外层收口）。"""
     mode = "deep" if mode == "deep" else "plan"
@@ -502,7 +509,7 @@ async def _stream_deep_events(
     try:
         budget.count_llm()
         async for piece in astream_chat(
-            _solve_messages(question, steps, observations, sources),
+            _solve_messages(question, steps, observations, sources, memory_text),
             s,
             model=s.agent_model_or_default,
             max_tokens=s.deep_max_tokens,
@@ -570,7 +577,7 @@ async def _stream_deep_events(
             try:
                 budget.count_llm()
                 async for piece in astream_chat(
-                    _solve_messages(question, steps, observations, sources)
+                    _solve_messages(question, steps, observations, sources, memory_text)
                     + [
                         {
                             "role": "user",

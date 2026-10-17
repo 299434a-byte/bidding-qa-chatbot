@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import Icon from "@/components/ui/icons";
 import HistoryPanel from "@/components/HistoryPanel";
 import type { User } from "@/lib/api";
@@ -52,6 +53,16 @@ export default function ConversationRail({
               refreshKey={historyRefreshKey}
             />
           </div>
+
+          {/* 长期记忆入口：登录后才有自己的画像可看 */}
+          {user && (
+            <div className="section rail-links">
+              <Link className="rail-link" href="/memory">
+                <Icon name="database" size={14} />
+                长期记忆
+              </Link>
+            </div>
+          )}
         </div>
 
         {/* 底部：用户信息 / 注销（单行减重：状态一行放，小按钮贴右侧，不再套卡片占位） */}

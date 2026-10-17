@@ -66,6 +66,8 @@ export type Health = {
   vision_configured?: boolean;
   history_enabled?: boolean;
   history_configured?: boolean;
+  memory_enabled?: boolean;
+  memory_configured?: boolean;
   auth_enabled?: boolean;
   modes?: ChatMode[];
   index: KbStats;
@@ -122,6 +124,24 @@ export type Conversation = {
   created_at: string;
   updated_at: string;
   message_count: number;
+};
+
+/** 长期记忆画像：关注实体 / 主题频次 + 最近提问时间线 */
+export type MemoryItem = {
+  name: string;
+  count: number;
+};
+
+export type MemoryRecent = {
+  ts: string;
+  question: string;
+};
+
+export type MemoryProfile = {
+  entities: MemoryItem[];
+  topics: MemoryItem[];
+  recent: MemoryRecent[];
+  updated_at?: string | null;
 };
 
 export type HistoryMeta = {
@@ -568,6 +588,12 @@ export const api = {
     authReq<{ items: HistoryHit[]; total: number; limit: number; offset: number; fts: boolean }>(
       `/api/history/search${query(params)}`,
     ),
+
+  // ------------------------------ 长期记忆 ------------------------------ //
+  /** 记忆画像：关注实体 / 主题频次 + 最近提问时间线（只看自己那份） */
+  memory: () => authReq<{ profile: MemoryProfile; summary: string }>("/api/memory"),
+  /** 清空当前用户的长期记忆画像 */
+  clearMemory: () => authReq<{ cleared: boolean }>("/api/memory", { method: "DELETE" }),
 };
 
 /** 上传图片给后端做视觉解析（智谱视觉模型），返回识别出的文本。 */
