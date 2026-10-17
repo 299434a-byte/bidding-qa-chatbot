@@ -40,6 +40,10 @@ data/kb_version.txt
 # SQLite 对话历史库
 data/*.db
 data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+# 长期记忆画像（按用户从对话里沉淀的 JSON，含用户数据，运行时生成）
+data/memory/
 # 日志与安装记录
 data/*.log
 data/pip_install.log
