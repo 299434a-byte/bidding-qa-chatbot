@@ -127,7 +127,7 @@ export type Conversation = {
 export type HistoryMeta = {
   mode?: string;
   tool_calls?: { name: string; query: string }[];
-  tool_results?: { name: string; count: number }[];
+  tool_results?: { name: string; count: number; elapsed_ms?: number | null; ok?: boolean }[];
   sources?: Source[];
   sql?: { sql: string; row_count: number; error?: string | null } | null;
   graph?: { cypher: string; row_count: number; error?: string | null } | null;
@@ -138,6 +138,12 @@ export type HistoryMeta = {
   revision?: string | null;
   done_mode?: string | null;
   error?: string | null;
+  /** 审计回放数据（新增字段，旧历史没有）：可信度 / 无依据句 / 阶段耗时 */
+  confidence?: number | null;
+  supported_sentences?: number | null;
+  total_sentences?: number | null;
+  hallucination_flags?: HallucinationFlag[];
+  phase_timings?: PhaseTimings | null;
 };
 
 export type HistoryMessage = {
@@ -216,6 +222,17 @@ export type ToolCallInfo = {
 export type ToolResultInfo = {
   name: string;
   count: number;
+  /** 单工具耗时（毫秒）；异常路径取不到起点时为 null，前端不显示（新增字段） */
+  elapsed_ms?: number | null;
+  /** 该次调用成功与否（ToolMessage.status != error）；旧后端没有该字段 */
+  ok?: boolean;
+};
+
+/** 阶段耗时（done 事件新增字段，毫秒；没跑过的阶段不出现） */
+export type PhaseTimings = {
+  retrieval_ms?: number;
+  rerank_ms?: number;
+  generation_ms?: number;
 };
 
 export type Source = {
@@ -298,7 +315,11 @@ export type ChatEvent =
       reason?: string;
       /** Agent 通路：本轮单轮最大并行工具数；旧后端 / 纯 RAG 通路没有该字段 */
       parallel_tools?: number;
+      /** 阶段耗时（检索/重排/生成，毫秒）；缓存命中等无审计数据的通路没有该字段 */
+      phase_timings?: PhaseTimings;
     }
+  /** 缓存命中：后端既有事件，前端据此在审计面板提示「无审计数据」 */
+  | { type: "cache_hit" }
   | { type: "no_gain"; reason: string; round: number }
   | { type: "error"; message: string }
   | ConversationEvent
@@ -313,7 +334,7 @@ export type ChatEvent =
     }
   | { type: "reflection"; round: number; verdict: "ok" | "revise"; issues: string[]; revision_offered: boolean }
   | { type: "tool_call"; name: string; query: string; arguments: Record<string, unknown> }
-  | { type: "tool_result"; name: string; count: number }
+  | { type: "tool_result"; name: string; count: number; elapsed_ms?: number | null; ok?: boolean }
   | {
       type: "sql_query";
       sql: string;

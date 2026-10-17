@@ -7,6 +7,7 @@
   - 覆盖率闸门：检索块与问题关键词重合度不足时拒绝进入生成（防答非所问）
   - 流式生成回答并做引用校验（检索无结果时输出 REF_1 标准文案），
     校验通过/失败都发 citation_check 事件，携带逐句可信度（confidence / hallucination_flags）
+  - done 事件携带 phase_timings 阶段耗时（检索/重排/生成，毫秒；审计面板用，纯新增字段）
   - 渲染来源引用文本块
   - 追问复用：以上一问证据直接作答（reused_answer_events，跳过检索/规划）
 
@@ -17,6 +18,8 @@
 from __future__ import annotations
 
 import re
+
+import time
 
 import unicodedata
 
@@ -235,7 +238,8 @@ def _stream_direct_answer(question: str, s: Settings) -> Iterator[dict[str, Any]
     """不需要检索的直答通道：跳过检索/来源/引用校验，直接生成一句寒暄类回复。
 
     事件顺序：delta("") → delta* → done(mode="direct")；``done`` 带
-    ``skipped_retrieval=true``，且绝不出现 sources / citation_check。
+    ``skipped_retrieval=true`` 与 ``phase_timings``（只有生成阶段；纯新增字段），
+    且绝不出现 sources / citation_check。
     """
     yield {"type": "delta", "text": ""}
     if not s.llm_configured:
@@ -246,18 +250,29 @@ def _stream_direct_answer(question: str, s: Settings) -> Iterator[dict[str, Any]
         {"role": "system", "content": DIRECT_CHAT_SYSTEM_PROMPT},
         {"role": "user", "content": question},
     ]
+    gen_started = time.perf_counter()
+
+    def _done(mode: str) -> dict[str, Any]:
+        return {
+            "type": "done",
+            "mode": mode,
+            "skipped_retrieval": True,
+            # 直答通道没有检索/重排阶段，只有生成耗时（审计面板缺哪段就不显示哪段）
+            "phase_timings": {"generation_ms": max(0, int((time.perf_counter() - gen_started) * 1000))},
+        }
+
     try:
         for piece in stream_chat(messages, s):
             yield {"type": "delta", "text": piece}
     except LLMNotConfigured:
         yield {"type": "delta", "text": NO_LLM_DIRECT_MESSAGE}
-        yield {"type": "done", "mode": "direct", "skipped_retrieval": True}
+        yield _done("direct")
         return
     except LLMError as exc:
         yield {"type": "error", "message": str(exc)}
-        yield {"type": "done", "mode": "llm_failed", "skipped_retrieval": True}
+        yield _done("llm_failed")
         return
-    yield {"type": "done", "mode": "direct", "skipped_retrieval": True}
+    yield _done("direct")
 
 
 def answer_events(
@@ -288,13 +303,23 @@ def answer_events(
     pool_k = max(want_k, s.rerank_candidates)
 
     try:
+        retrieve_started = time.perf_counter()
         result: RetrievalResult = retrieve(question, settings=s, final_k=pool_k)
+        retrieved_at = time.perf_counter()
         hits, rerank_meta = rerank_hits(question, result.hits, s, top_k=want_k)
+        reranked_at = time.perf_counter()
         result.hits = hits
         result.rerank_meta = rerank_meta
     except Exception as exc:
         yield {"type": "error", "message": f"检索失败：{exc}"}
         return
+
+    # 阶段耗时（审计面板用，纯新增字段）：检索 / 重排两段在这里量，
+    # 生成段在 _stream_generated_answer 收尾时补上。
+    phase_timings: dict[str, Any] = {
+        "retrieval_ms": max(0, int((retrieved_at - retrieve_started) * 1000)),
+        "rerank_ms": max(0, int((reranked_at - retrieved_at) * 1000)),
+    }
 
     # 第二道判据（与 dense_min_score 并列）：问题实词在最终候选上的最大覆盖率
     coverage = term_coverage(question, result.hits)
@@ -318,13 +343,13 @@ def answer_events(
 
     if not sources:
         yield {"type": "delta", "text": NO_DATA_MESSAGE}
-        yield {"type": "done", "mode": "no_data"}
+        yield {"type": "done", "mode": "no_data", "phase_timings": dict(phase_timings)}
         return
 
     if not s.llm_configured:
         # 未配置大模型：仅检索列举原文、不生成不编造，覆盖率闸门不介入（保持既有降级行为）。
         yield {"type": "delta", "text": retrieval_only_answer(sources)}
-        yield {"type": "done", "mode": "retrieval_only"}
+        yield {"type": "done", "mode": "retrieval_only", "phase_timings": dict(phase_timings)}
         return
 
     if coverage < s.coverage_min:
@@ -337,12 +362,12 @@ def answer_events(
             "refused": True,
         }
         yield {"type": "delta", "text": COVERAGE_REFUSAL_MESSAGE}
-        yield {"type": "done", "mode": "coverage_refused"}
+        yield {"type": "done", "mode": "coverage_refused", "phase_timings": dict(phase_timings)}
         return
 
     metrics_store.bump("coverage_pass", settings=s)
 
-    yield from _stream_generated_answer(question, sources, s)
+    yield from _stream_generated_answer(question, sources, s, phase_timings=phase_timings)
 
 
 def _stream_generated_answer(
@@ -351,12 +376,22 @@ def _stream_generated_answer(
     s: Settings,
     *,
     done_extra: dict[str, Any] | None = None,
+    phase_timings: dict[str, Any] | None = None,
 ) -> Iterator[dict[str, Any]]:
     """对**已确定的来源**流式生成答案（完整链路与追问复用链路共用）。
 
     事件顺序：delta("") → thinking/delta* → done → [citation_check + revision]。
     ``done_extra`` 会并入 done 事件（如追问复用标注 reused=true）。
+    ``phase_timings`` 传入检索/重排耗时；每个 done 事件统一补上 ``generation_ms``
+    （审计面板的阶段耗时，纯新增字段；0 毫秒的段由前端隐藏）。
     """
+    timings: dict[str, Any] = dict(phase_timings or {})
+    gen_started = time.perf_counter()
+
+    def _done(mode: str) -> dict[str, Any]:
+        timings["generation_ms"] = max(0, int((time.perf_counter() - gen_started) * 1000))
+        return {"type": "done", "mode": mode, **(done_extra or {}), "phase_timings": dict(timings)}
+
     yield {"type": "delta", "text": ""}
     answer_parts: list[str] = []
     # 思维链缓冲：stream_chat 在正文间隙回调 on_thinking，这里转成独立的 thinking 事件
@@ -378,14 +413,14 @@ def _stream_generated_answer(
         yield from _drain_thinking()
     except LLMNotConfigured:
         yield {"type": "delta", "text": retrieval_only_answer(sources)}
-        yield {"type": "done", "mode": "retrieval_only", **(done_extra or {})}
+        yield _done("retrieval_only")
         return
     except LLMError as exc:
         yield {"type": "error", "message": str(exc)}
-        yield {"type": "done", "mode": "llm_failed", **(done_extra or {})}
+        yield _done("llm_failed")
         return
 
-    yield {"type": "done", "mode": "llm", **(done_extra or {})}
+    yield _done("llm")
 
     if not sources:
         # 没有来源就没有比对依据（如「跳过检索」的直答通道）：不校验、不发 citation_check。

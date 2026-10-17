@@ -500,6 +500,12 @@ a {
   cursor: help;
 }
 
+/* 无依据句点击定位：短暂高亮正文对应位置 */
+.locate-flash {
+  background: color-mix(in srgb, var(--warning-500) 28%, transparent);
+  border-radius: 4px;
+}
+
 .notice-info {
   background: var(--info-50);
   border-color: color-mix(in srgb, var(--info-500) 25%, transparent);

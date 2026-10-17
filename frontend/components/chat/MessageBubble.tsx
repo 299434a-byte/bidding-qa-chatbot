@@ -3,6 +3,7 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import Icon from "@/components/ui/icons";
 import ToolTrace from "@/components/chat/ToolTrace";
+import AuditPanel from "@/components/chat/AuditPanel";
 import { mdToHtml } from "@/lib/markdown";
 import { formatHm } from "@/lib/timefmt";
 import type {
@@ -10,6 +11,7 @@ import type {
   GraphQueryInfo,
   HallucinationFlag,
   NumberCheck,
+  PhaseTimings,
   PlanStep,
   PlanStepRun,
   ReflectionInfo,
@@ -49,7 +51,7 @@ export type Message = {
   meta?: RetrievalMeta;
   /** 推理模型的思维链全文（thinking 事件逐段累积；没有则整块不渲染） */
   thinking?: string;
-  toolCalls?: (ToolCallInfo & { count?: number })[];
+  toolCalls?: (ToolCallInfo & { count?: number; elapsedMs?: number | null; ok?: boolean })[];
   sqlQueries?: SqlQueryInfo[];
   graphQueries?: GraphQueryInfo[];
   webSearches?: WebSearchInfo[];
@@ -66,6 +68,10 @@ export type Message = {
   supportedSentences?: number;
   totalSentences?: number;
   hallucinationFlags?: HallucinationFlag[];
+  /** 阶段耗时（done.phase_timings）；缓存命中/降级回答没有该字段 */
+  phaseTimings?: PhaseTimings;
+  /** 本次回答命中缓存（cache_hit 事件）：审计面板提示「无审计数据」 */
+  cacheHit?: boolean;
   revisionByCitation?: boolean;
   adoptedVersion?: "v1" | "v2";
   mode?: string;
@@ -160,6 +166,31 @@ function MessageBubble({ msg, highlighted, busy, onFillInput, onAdopt, onOpenEvi
   }, [msg.streaming]);
   /** 悬停中的引用信息（编号 + 相对 .msg-body 的定位） */
   const [citeHover, setCiteHover] = useState<{ n: number; top: number; left: number } | null>(null);
+  /** 审计面板展开态（操作条「审计」按钮切换） */
+  const [auditOpen, setAuditOpen] = useState(false);
+
+  /** 无依据句点击定位：在正文 HTML 里找该句首个可命中的文本节点并滚动高亮 */
+  const locateSentence = (sentence: string) => {
+    const needle = (sentence || "").trim().slice(0, 12);
+    const root = bodyRef.current;
+    if (!needle || !root) return;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    let node = walker.nextNode();
+    while (node) {
+      const text = node.textContent ?? "";
+      const index = text.indexOf(needle);
+      if (index >= 0 && node.parentElement) {
+        const target = node.parentElement;
+        target.scrollIntoView({ behavior: "smooth", block: "center" });
+        target.classList.add("locate-flash");
+        window.setTimeout(() => target.classList.remove("locate-flash"), 1600);
+        return;
+      }
+      node = walker.nextNode();
+    }
+    // 句子没匹配上（正文被修订/截断）：只滚动到消息本身，不报错
+    root.scrollIntoView({ behavior: "smooth", block: "center" });
+  };
 
   const isAssistant = msg.role === "assistant";
   const showingRevision = msg.revision && (msg.adoptedVersion ?? "v1") === "v2";
@@ -506,6 +537,18 @@ function MessageBubble({ msg, highlighted, busy, onFillInput, onAdopt, onOpenEvi
                   引用定位
                 </button>
               )}
+              {/* 审计：可信度 / 阶段耗时 / 工具调用 / 无依据句（点击展开内联面板） */}
+              {isAssistant && !msg.streaming && (
+                <button
+                  className="act-btn"
+                  type="button"
+                  aria-expanded={auditOpen}
+                  onClick={() => setAuditOpen((open) => !open)}
+                >
+                  <Icon name="file-text" size={14} />
+                  审计
+                </button>
+              )}
             </div>
 
             {/* 规划 / 步骤 / 反思：保留原有语义，样式对齐 token */}
@@ -579,6 +622,20 @@ function MessageBubble({ msg, highlighted, busy, onFillInput, onAdopt, onOpenEvi
 
             {/* 工具调用痕迹（SQL / Cypher / 联网搜索结果，可折叠） */}
             <ToolTrace sqlQueries={msg.sqlQueries} graphQueries={msg.graphQueries} webSearches={msg.webSearches} />
+
+            {/* 回答审计面板：内联展开（样式复用 ToolTrace 的折叠卡），无数据时给明确提示 */}
+            {isAssistant && !msg.streaming && auditOpen && (
+              <AuditPanel
+                confidence={msg.confidence}
+                supportedSentences={msg.supportedSentences}
+                totalSentences={msg.totalSentences}
+                hallucinationFlags={msg.hallucinationFlags}
+                phaseTimings={msg.phaseTimings}
+                toolCalls={msg.toolCalls}
+                cacheHit={msg.cacheHit}
+                onLocateSentence={locateSentence}
+              />
+            )}
           </>
         )}
       </div>

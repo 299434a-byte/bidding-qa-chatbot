@@ -6,6 +6,7 @@
   - 流式产出工具调用轨迹与中间消息事件，供 SSE 下发
   - 组装 Agent 系统提示词并维护每轮请求状态快照
   - 步数上限用尽时强制收口（bind_tools tool_choice=none）逼出最终文字答案
+  - 审计数据（纯新增字段）：tool_result 带 elapsed_ms / ok，done 带 phase_timings
 
 依赖：rag、retriever、rerank、llm、graph、pg、web_search、citation、deep_agent、config
 被谁调用：main（/api/agent/chat）、deep_agent
@@ -14,6 +15,8 @@
 from __future__ import annotations
 
 import asyncio
+
+import time
 
 from pathlib import Path
 
@@ -337,10 +340,18 @@ def _run_retrieval(query: str, state: dict[str, Any]) -> tuple[str, int]:
     want_k: int = state["final_k"]
     pool_k = max(want_k, s.rerank_candidates)
 
+    retrieve_started = time.perf_counter()
     result = retrieve(query, settings=s, final_k=pool_k)
+    retrieved_at = time.perf_counter()
     hits, rerank_meta = rerank_hits(query, result.hits, s, top_k=want_k)
+    reranked_at = time.perf_counter()
     result.hits = hits
     result.rerank_meta = rerank_meta
+    # 阶段耗时累计（同一问答可能多次检索，逐次累加；done.phase_timings 汇总透出）
+    state["retrieval_ms"] = int(state.get("retrieval_ms") or 0) + max(
+        0, int((retrieved_at - retrieve_started) * 1000)
+    )
+    state["rerank_ms"] = int(state.get("rerank_ms") or 0) + max(0, int((reranked_at - retrieved_at) * 1000))
     # 检索轮次序号 +1：供 deep 模式判定「这一轮是否真的发生过检索」
     # （没调检索工具的步骤不参与无增益判定，避免把「直接作答」误判成停滞）。
     state["retrieval_seq"] = int(state.get("retrieval_seq") or 0) + 1
@@ -433,6 +444,9 @@ def _new_turn_state() -> dict[str, Any]:
         # 本轮观察到的单轮最大并行工具数（一条 AIMessage 带 N 个 tool_calls 记 N），
         # 随 done 事件透出，供 metrics 记账。
         "max_parallel_tools": 0,
+        # 每个 tool_call 的起点时刻（key=tool_call_id）：ToolMessage 到达时配对算
+        # 单工具耗时（tool_result.elapsed_ms，审计面板用，纯新增字段）。
+        "tool_started": {},
     }
 
 
@@ -536,6 +550,13 @@ async def _stream_react_turn(
         if mode == "messages":
             chunk = payload[0] if isinstance(payload, tuple) else payload
             if isinstance(chunk, ToolMessage):
+                # 审计数据（纯新增字段）：按 tool_call_id 配对起点算单工具耗时；
+                # 起点查不到（异常路径）时 elapsed_ms 为 null，前端不显示。
+                started = (turn.get("tool_started") or {}).pop(str(chunk.tool_call_id or ""), None)
+                elapsed_ms = (
+                    max(0, int((time.perf_counter() - started) * 1000)) if started is not None else None
+                )
+                tool_ok = str(getattr(chunk, "status", "") or "") != "error"
                 if chunk.name == PG_TOOL_NAME:
                     yield {
                         "type": "sql_query",
@@ -549,6 +570,8 @@ async def _stream_react_turn(
                         "type": "tool_result",
                         "name": PG_TOOL_NAME,
                         "count": pg_state.get("row_count") or 0,
+                        "elapsed_ms": elapsed_ms,
+                        "ok": tool_ok,
                     }
                 elif chunk.name == GRAPH_TOOL_NAME:
                     yield {
@@ -562,6 +585,8 @@ async def _stream_react_turn(
                         "type": "tool_result",
                         "name": GRAPH_TOOL_NAME,
                         "count": graph_state.get("row_count") or 0,
+                        "elapsed_ms": elapsed_ms,
+                        "ok": tool_ok,
                     }
                 elif chunk.name == WEB_TOOL_NAME:
                     results = web_state.get("results") or []
@@ -575,10 +600,18 @@ async def _stream_react_turn(
                         "type": "tool_result",
                         "name": WEB_TOOL_NAME,
                         "count": len(results),
+                        "elapsed_ms": elapsed_ms,
+                        "ok": tool_ok,
                     }
                 elif chunk.name == SKILL_TOOL_NAME:
                     # 技能读取是「换提示词正文」，不是检索：不触发 sources，结果按 1 份计。
-                    yield {"type": "tool_result", "name": SKILL_TOOL_NAME, "count": 1}
+                    yield {
+                        "type": "tool_result",
+                        "name": SKILL_TOOL_NAME,
+                        "count": 1,
+                        "elapsed_ms": elapsed_ms,
+                        "ok": tool_ok,
+                    }
                 else:
                     if emit_sources and not turn["sources_emitted"]:
                         yield {"type": "retrieval", "meta": rag_state.get("meta") or {}}
@@ -588,6 +621,8 @@ async def _stream_react_turn(
                         "type": "tool_result",
                         "name": chunk.name or TOOL_NAME,
                         "count": rag_state.get("hit_count", 0),
+                        "elapsed_ms": elapsed_ms,
+                        "ok": tool_ok,
                     }
             elif isinstance(chunk, AIMessage):
                 # 思维链单独一路（thinking 事件），绝不混进正文 delta；
@@ -609,6 +644,8 @@ async def _stream_react_turn(
             for call in msg.tool_calls:
                 turn["tool_called"] = True
                 args = call.get("args") or {}
+                # 记录该 tool_call 的起点时刻：ToolMessage 到达时按 id 配对算单工具耗时
+                turn.setdefault("tool_started", {})[str(call.get("id") or "")] = time.perf_counter()
                 yield {
                     "type": "tool_call",
                     "name": call.get("name") or TOOL_NAME,
@@ -738,8 +775,12 @@ async def agent_events(
             yield {"type": "delta", "text": retrieval_only_answer(sources)}
         yield {"type": "done", "mode": "agent_failed"}
 
+    # 生成阶段计时起点：最后一个 tool_result（没有工具轮时是整轮起点）。
+    # 语义 = 「最后一次模型调用（含思维链）的耗时」；检索/重排耗时另由 _run_retrieval 累计。
+    last_tool_at = time.perf_counter()
     try:
         agent = _build_agent(s, web_search_enabled=use_web)
+        last_tool_at = time.perf_counter()
         async for event in _stream_react_turn(
             agent,
             {"messages": _build_messages(question, history, s)},
@@ -748,6 +789,9 @@ async def agent_events(
             question=question,
             recursion_limit=s.agent_max_steps,
         ):
+            if event.get("type") == "tool_result":
+                # 工具轮结束 = 下一跳就是模型的最终回答，重置生成段计时起点
+                last_tool_at = time.perf_counter()
             yield event
     except GraphRecursionError:
         # 步数上限用尽（模型大概率还想调工具）：强制收口，禁止工具、逼出最终文字答案。
@@ -790,9 +834,18 @@ async def agent_events(
     for event in citation_events:
         yield event
 
+    # 阶段耗时（审计面板用，纯新增字段）：检索/重排由 _run_retrieval 累计，
+    # 生成段 = 最后一个 tool_result 到收尾的模型调用；没跑过的阶段不出现。
+    phase_timings: dict[str, Any] = {}
+    if state.get("retrieval_seq"):
+        phase_timings["retrieval_ms"] = int(state.get("retrieval_ms") or 0)
+        phase_timings["rerank_ms"] = int(state.get("rerank_ms") or 0)
+    phase_timings["generation_ms"] = max(0, int((time.perf_counter() - last_tool_at) * 1000))
+
     yield {
         "type": "done",
         "mode": "agent_rag" if turn["tool_called"] else "agent_direct",
         # 单轮最大并行工具数（纯新增字段；1 = 本轮没出现并行批次）。
         "parallel_tools": int(turn.get("max_parallel_tools") or 0),
+        "phase_timings": phase_timings,
     }

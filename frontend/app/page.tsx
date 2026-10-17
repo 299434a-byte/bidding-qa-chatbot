@@ -172,12 +172,17 @@ export default function Home() {
           };
         }
         const meta = item.meta;
-        // 把工具调用与结果按名字配对，补回「命中 N 条」徽标
-        const toolCalls = meta?.tool_calls?.map((call) => ({
-          name: call.name,
-          query: call.query,
-          count: meta.tool_results?.find((r) => r.name === call.name)?.count,
-        }));
+        // 把工具调用与结果按名字配对，补回「命中 N 条」徽标（含审计用的耗时/成败）
+        const toolCalls = meta?.tool_calls?.map((call) => {
+          const result = meta.tool_results?.find((r) => r.name === call.name);
+          return {
+            name: call.name,
+            query: call.query,
+            count: result?.count,
+            elapsedMs: result?.elapsed_ms ?? null,
+            ok: result?.ok,
+          };
+        });
         return {
           id: item.id,
           role: "assistant" as const,
@@ -221,6 +226,14 @@ export default function Home() {
           steps: meta?.steps,
           reflections: meta?.reflections,
           revision: meta?.revision ?? undefined,
+          // 审计回放（新字段，旧历史没有就 undefined，面板自行降级）
+          confidence: meta?.confidence ?? undefined,
+          supportedSentences: meta?.supported_sentences ?? undefined,
+          totalSentences: meta?.total_sentences ?? undefined,
+          hallucinationFlags: meta?.hallucination_flags ?? undefined,
+          phaseTimings: meta?.phase_timings ?? undefined,
+          // 缓存命中的历史消息：meta.done_mode=cache，面板提示「无审计数据」
+          cacheHit: meta?.done_mode === "cache",
           // 历史里只存了错误原文，包成结构化错误块（人话 + 技术详情折叠）
           error: meta?.error
             ? { kind: "server" as const, message: "该回答生成时出错了。", detail: meta.error }
@@ -439,10 +452,15 @@ export default function Home() {
           else if (event.type === "tool_result")
             patch((msg) => {
               const calls = [...(msg.toolCalls ?? [])];
-              // 结果补到最近一次同名调用上
+              // 结果补到最近一次同名调用上（elapsed_ms / ok 是审计面板新增字段，旧后端没有）
               for (let i = calls.length - 1; i >= 0; i -= 1) {
                 if (calls[i].name === event.name) {
-                  calls[i] = { ...calls[i], count: event.count };
+                  calls[i] = {
+                    ...calls[i],
+                    count: event.count,
+                    elapsedMs: event.elapsed_ms ?? null,
+                    ok: event.ok,
+                  };
                   break;
                 }
               }
@@ -500,10 +518,19 @@ export default function Home() {
               totalSentences: event.total_sentences,
               hallucinationFlags: event.hallucination_flags,
             }));
+          else if (event.type === "cache_hit")
+            // 缓存命中：审计面板据此显示「无审计数据」（不改正文与来源）
+            patch((msg) => ({ ...msg, cacheHit: true }));
           else if (event.type === "done") {
             // 结束前先把缓冲里的最后一段 delta 冲刷出来，再收尾状态
             flushNow();
-            patch((msg) => ({ ...msg, mode: event.mode, streaming: false }));
+            patch((msg) => ({
+              ...msg,
+              mode: event.mode,
+              streaming: false,
+              // 阶段耗时（done 新增字段，审计面板用）；缓存命中/降级回答没有就不挂
+              phaseTimings: event.phase_timings,
+            }));
           } else if (event.type === "error") {
             // 服务端报错不清空已输出内容，只追加错误块；缓冲里的内容同样先落库
             flushNow();

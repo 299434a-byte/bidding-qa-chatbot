@@ -194,13 +194,26 @@ class _EventCollector:
         self.error: str | None = None
         self.confidence: float | None = None
         self.parallel_tools: int = 0
+        # 审计面板数据（纯新增）：阶段耗时 + 逐句可信度明细，随 meta 落库供刷新后回放
+        self.phase_timings: dict[str, Any] | None = None
+        self.supported_sentences: int | None = None
+        self.total_sentences: int | None = None
+        self.hallucination_flags: list[dict[str, Any]] = []
 
     def feed(self, event: dict[str, Any]) -> None:
         etype = event.get("type")
         if etype == "tool_call":
             self.tool_calls.append({"name": event.get("name"), "query": event.get("query")})
         elif etype == "tool_result":
-            self.tool_results.append({"name": event.get("name"), "count": event.get("count")})
+            self.tool_results.append(
+                {
+                    "name": event.get("name"),
+                    "count": event.get("count"),
+                    # 单工具耗时与成败（审计面板新增字段，旧后端没有）
+                    "elapsed_ms": event.get("elapsed_ms"),
+                    "ok": event.get("ok"),
+                }
+            )
         elif etype == "retrieval":
             meta = event.get("meta") or {}
             self.rerank_applied = bool(meta.get("rerank_applied"))
@@ -258,11 +271,18 @@ class _EventCollector:
             # 逐句可信度（纯新增字段）：没有就不动，保持 None
             if event.get("confidence") is not None:
                 self.confidence = float(event["confidence"])
+            if event.get("supported_sentences") is not None:
+                self.supported_sentences = int(event["supported_sentences"])
+            if event.get("total_sentences") is not None:
+                self.total_sentences = int(event["total_sentences"])
+            self.hallucination_flags = list(event.get("hallucination_flags") or [])
         elif etype == "done":
             self.done_mode = event.get("mode")
             # Agent 通路的 done 带本轮单轮最大并行工具数（纯新增字段，老后端没有）
             if event.get("parallel_tools") is not None:
                 self.parallel_tools = int(event["parallel_tools"])
+            if event.get("phase_timings"):
+                self.phase_timings = dict(event["phase_timings"])
 
     def answer_text(self) -> str:
         return "".join(self.answer).strip()
@@ -282,6 +302,12 @@ class _EventCollector:
             "revision": "".join(self.revision).strip() or None,
             "done_mode": self.done_mode,
             "error": self.error,
+            # 审计面板回放数据（纯新增）：刷新页面后历史消息仍能展示可信度/耗时/无依据句
+            "confidence": self.confidence,
+            "supported_sentences": self.supported_sentences,
+            "total_sentences": self.total_sentences,
+            "hallucination_flags": self.hallucination_flags,
+            "phase_timings": self.phase_timings,
         }
 
 
