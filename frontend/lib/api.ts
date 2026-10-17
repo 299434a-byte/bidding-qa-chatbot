@@ -144,6 +144,8 @@ export type HistoryMeta = {
   total_sentences?: number | null;
   hallucination_flags?: HallucinationFlag[];
   phase_timings?: PhaseTimings | null;
+  /** 澄清卡片回放数据（新增字段，旧历史没有）：澄清提问 + 候选选项 */
+  clarify?: ClarifyInfo | null;
 };
 
 export type HistoryMessage = {
@@ -235,6 +237,12 @@ export type PhaseTimings = {
   generation_ms?: number;
 };
 
+/** 对话澄清（clarify 事件新增字段）：澄清提问 + 2~4 个可点选项 */
+export type ClarifyInfo = {
+  question: string;
+  options: string[];
+};
+
 export type Source = {
   doc_id: string;
   table: string;
@@ -320,6 +328,8 @@ export type ChatEvent =
     }
   /** 缓存命中：后端既有事件，前端据此在审计面板提示「无审计数据」 */
   | { type: "cache_hit" }
+  /** 对话澄清：问题歧义时后端不检索不调模型，直接给澄清提问与候选选项 */
+  | { type: "clarify"; question: string; options: string[] }
   | { type: "no_gain"; reason: string; round: number }
   | { type: "error"; message: string }
   | ConversationEvent

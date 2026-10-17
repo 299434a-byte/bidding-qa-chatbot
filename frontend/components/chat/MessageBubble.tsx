@@ -8,6 +8,7 @@ import { mdToHtml } from "@/lib/markdown";
 import { formatHm } from "@/lib/timefmt";
 import type {
   CitationIssue,
+  ClarifyInfo,
   GraphQueryInfo,
   HallucinationFlag,
   NumberCheck,
@@ -72,6 +73,8 @@ export type Message = {
   phaseTimings?: PhaseTimings;
   /** 本次回答命中缓存（cache_hit 事件）：审计面板提示「无审计数据」 */
   cacheHit?: boolean;
+  /** 澄清卡片（clarify 事件）：问题歧义时先问清楚，点选项即作为新问题发送 */
+  clarify?: ClarifyInfo;
   revisionByCitation?: boolean;
   adoptedVersion?: "v1" | "v2";
   mode?: string;
@@ -88,6 +91,8 @@ type Props = {
   onAdopt: (id: string, version: "v1" | "v2") => void;
   onOpenEvidence?: (sourceIndex?: number) => void;
   onRegenerate?: (id: string) => void;
+  /** 点澄清卡片的选项 chip：该选项文本作为新问题直接发送 */
+  onClarifyPick?: (option: string) => void;
   onToast: (text: string, kind?: "success" | "error" | "info") => void;
 };
 
@@ -146,7 +151,7 @@ function markMissNumbers(html: string, misses: string[]): string {
   return parts.join("");
 }
 
-function MessageBubble({ msg, highlighted, busy, onFillInput, onAdopt, onOpenEvidence, onRegenerate, onToast }: Props) {
+function MessageBubble({ msg, highlighted, busy, onFillInput, onAdopt, onOpenEvidence, onRegenerate, onClarifyPick, onToast }: Props) {
   // Markdown 只在 content / 来源条数变化时重解析（流式增量由 page.tsx 的 50ms 节流控制频率）
   const citeMax = msg.sources?.length ?? 0;
   const contentHtml = useMemo(() => {
@@ -336,8 +341,35 @@ function MessageBubble({ msg, highlighted, busy, onFillInput, onAdopt, onOpenEvi
               </details>
             )}
 
+            {/* 澄清卡片：问题歧义时后端不检索不调模型，先问清楚；
+                点选项 chip 即把该选项文本作为新问题发送。 */}
+            {msg.clarify && (
+              <div className="clarify-card" data-testid="clarify">
+                <div className="plan-card-head">
+                  <span className="badge badge-warn">需要澄清</span>
+                  <span className="badge badge-plain">点选一个方向，或直接补充完整问题</span>
+                </div>
+                <div className="clarify-question">{msg.clarify.question}</div>
+                {msg.clarify.options.length > 0 && (
+                  <div className="clarify-options">
+                    {msg.clarify.options.map((option) => (
+                      <button
+                        key={option}
+                        className="chip"
+                        type="button"
+                        disabled={busy}
+                        onClick={() => onClarifyPick?.(option)}
+                      >
+                        {option}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* 首 token 前：骨架行占位（内容来了就消失） */}
-            {msg.streaming && !msg.content && !msg.aborted && (
+            {msg.streaming && !msg.content && !msg.aborted && !msg.clarify && (
               <div aria-hidden="true">
                 <div className="skeleton skel-line" />
                 <div className="skeleton skel-line" />

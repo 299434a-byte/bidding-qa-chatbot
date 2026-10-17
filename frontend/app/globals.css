@@ -1510,6 +1510,27 @@ button.cite:active {
   margin-bottom: var(--sp-8);
 }
 
+/* 澄清卡片：问题歧义时先问清楚（问题文案 + 可点选项 chips） */
+.clarify-card {
+  border: 1px solid color-mix(in srgb, var(--warning-500) 35%, transparent);
+  border-radius: var(--r-10);
+  background: var(--neutral-50);
+  padding: var(--sp-12);
+  margin-bottom: var(--sp-12);
+}
+
+.clarify-question {
+  font-size: var(--text-13);
+  color: var(--neutral-800);
+  margin-bottom: var(--sp-8);
+}
+
+.clarify-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-8);
+}
+
 .plan-list {
   margin: 0;
   padding-left: 20px;

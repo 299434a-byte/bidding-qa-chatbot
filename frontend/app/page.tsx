@@ -234,6 +234,8 @@ export default function Home() {
           phaseTimings: meta?.phase_timings ?? undefined,
           // 缓存命中的历史消息：meta.done_mode=cache，面板提示「无审计数据」
           cacheHit: meta?.done_mode === "cache",
+          // 澄清卡片回放：刷新后仍可点选项继续问
+          clarify: meta?.clarify ?? undefined,
           // 历史里只存了错误原文，包成结构化错误块（人话 + 技术详情折叠）
           error: meta?.error
             ? { kind: "server" as const, message: "该回答生成时出错了。", detail: meta.error }
@@ -521,6 +523,9 @@ export default function Home() {
           else if (event.type === "cache_hit")
             // 缓存命中：审计面板据此显示「无审计数据」（不改正文与来源）
             patch((msg) => ({ ...msg, cacheHit: true }));
+          else if (event.type === "clarify")
+            // 澄清卡片：问题歧义时后端直接给澄清提问与候选选项（不检索不调模型）
+            patch((msg) => ({ ...msg, clarify: { question: event.question, options: event.options } }));
           else if (event.type === "done") {
             // 结束前先把缓冲里的最后一段 delta 冲刷出来，再收尾状态
             flushNow();
@@ -784,6 +789,7 @@ export default function Home() {
               onFillInput={fillInput}
               onAdopt={setAdopted}
               onRegenerate={regenerate}
+              onClarifyPick={send}
               onOpenEvidence={openEvidence}
               onToast={pushToast}
             />

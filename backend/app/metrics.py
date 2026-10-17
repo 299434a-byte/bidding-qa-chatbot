@@ -72,6 +72,7 @@ COUNTER_NAMES = (
     "no_gain_stop",
     "followup_reused",
     "retrieval_skipped",
+    "clarify_count",
 )
 
 _schema_ready: set[str] = set()
@@ -271,6 +272,7 @@ def summary(settings: Settings | None = None) -> dict[str, Any]:
         "no_gain_stop": 0,
         "followup_reused": 0,
         "retrieval_skipped": 0,
+        "clarify_count": 0,
         "budget": empty_budget,
     }
     try:
@@ -361,6 +363,8 @@ def summary(settings: Settings | None = None) -> dict[str, Any]:
             "followup_reused": counters.get("followup_reused", 0),
             # Self-RAG 检索判定：寒暄类问题跳过检索的次数（retrieval.meta.skipped_retrieval）
             "retrieval_skipped": counters.get("retrieval_skipped", 0),
+            # 对话澄清：问题歧义时先发 clarify 事件、不检索不调模型的次数
+            "clarify_count": counters.get("clarify_count", 0),
             "budget": budget,
         }
     except Exception:

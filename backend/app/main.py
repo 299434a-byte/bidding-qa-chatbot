@@ -35,6 +35,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from . import auth, history as history_store
 from . import ratelimit
+from .clarify import needs_clarification
 from .agent import MODES, TOOL_NAME, agent_events
 
 from .config import (
@@ -1097,12 +1098,16 @@ async def agent_chat(
 
     persist = bool(user and s.history_configured)
 
+    # —— 对话澄清（最前面判定）：问题歧义时不检索、不调模型、不吃缓存 ——
+    clarify = needs_clarification(payload.question, has_history=bool(history))
+    clarify_needed = bool(clarify.get("needed"))
+
     request_started = time.perf_counter()
     use_web = s.web_search_default if payload.web_search is None else bool(payload.web_search)
     use_web = bool(use_web and s.web_search_configured)
     # 指定模型的请求不吃默认模型的缓存（缓存键不含模型，共用会串答案），也不写入。
     model_override = bool((payload.model or "").strip())
-    cacheable = (not model_override) and answer_cache.is_cacheable(
+    cacheable = (not clarify_needed) and (not model_override) and answer_cache.is_cacheable(
         logged_in=bool(user),
         mode=mode,
         has_history=bool(history),
@@ -1112,7 +1117,8 @@ async def agent_chat(
     )
     cached = (
         answer_cache.get_cached(payload.question, s, mode=mode, top_k=payload.top_k)
-        if (not model_override)
+        if (not clarify_needed)
+        and (not model_override)
         and answer_cache.is_cache_readable(
             logged_in=bool(user), mode=mode, has_image=False, question=payload.question
         )
@@ -1154,6 +1160,41 @@ async def agent_chat(
                 "saved": conversation is not None,
             }
         )
+
+        # —— 对话澄清：问题歧义时不检索、不调模型，发 clarify 事件后直接 done ——
+        if clarify_needed:
+            metrics_store.bump("clarify_count", settings=s)
+            clarify_event = {
+                "type": "clarify",
+                "question": clarify.get("question") or "",
+                "options": list(clarify.get("options") or []),
+            }
+            yield _sse(clarify_event)
+            yield _sse({"type": "done", "mode": "clarify"})
+            if conversation is not None:
+                try:
+                    # 澄清轮也落库：用户问题 + 澄清提问，刷新后前端还能回放澄清卡片。
+                    await asyncio.to_thread(
+                        history_store.append_message,
+                        s,
+                        user["id"],
+                        conversation["id"],
+                        "assistant",
+                        clarify_event["question"],
+                        {
+                            "mode": mode,
+                            "done_mode": "clarify",
+                            "clarify": {
+                                "question": clarify_event["question"],
+                                "options": clarify_event["options"],
+                            },
+                        },
+                        mode,
+                    )
+                except Exception:  # noqa: BLE001 - 落库失败绝不影响问答
+                    pass
+            yield "data: [DONE]\n\n"
+            return
 
         if cached is not None:
             yield _sse({"type": "cache_hit"})
