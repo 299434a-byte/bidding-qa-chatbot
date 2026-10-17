@@ -73,6 +73,12 @@ COUNTER_NAMES = (
     "followup_reused",
     "retrieval_skipped",
     "clarify_count",
+    # 意图路由：问题被归到哪一类；intent_fallback = 判不准、已退回全量工具
+    "intent_regulation",
+    "intent_enterprise",
+    "intent_project",
+    "intent_unknown",
+    "intent_fallback",
 )
 
 _schema_ready: set[str] = set()
@@ -273,6 +279,11 @@ def summary(settings: Settings | None = None) -> dict[str, Any]:
         "followup_reused": 0,
         "retrieval_skipped": 0,
         "clarify_count": 0,
+        "intent_regulation": 0,
+        "intent_enterprise": 0,
+        "intent_project": 0,
+        "intent_unknown": 0,
+        "intent_fallback": 0,
         "budget": empty_budget,
     }
     try:
@@ -365,6 +376,12 @@ def summary(settings: Settings | None = None) -> dict[str, Any]:
             "retrieval_skipped": counters.get("retrieval_skipped", 0),
             # 对话澄清：问题歧义时先发 clarify 事件、不检索不调模型的次数
             "clarify_count": counters.get("clarify_count", 0),
+            # 意图路由：各意图命中次数 + 判不准退回全量工具的次数
+            "intent_regulation": counters.get("intent_regulation", 0),
+            "intent_enterprise": counters.get("intent_enterprise", 0),
+            "intent_project": counters.get("intent_project", 0),
+            "intent_unknown": counters.get("intent_unknown", 0),
+            "intent_fallback": counters.get("intent_fallback", 0),
             "budget": budget,
         }
     except Exception:

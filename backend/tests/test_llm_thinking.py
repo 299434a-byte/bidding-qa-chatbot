@@ -196,7 +196,11 @@ def test_agent_stream_forwards_thinking_without_polluting_delta(monkeypatch) -> 
 
             return _gen()
 
-    monkeypatch.setattr(agent_mod, "_build_agent", lambda s, web_search_enabled=False: _ThinkingAgent())
+    monkeypatch.setattr(
+        agent_mod,
+        "_build_agent",
+        lambda s, web_search_enabled=False, intent="unknown": _ThinkingAgent(),
+    )
 
     async def _collect():
         return [e async for e in agent_mod.agent_events("市政道路的预算是多少？", get_settings())]

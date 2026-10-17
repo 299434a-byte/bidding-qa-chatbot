@@ -44,6 +44,8 @@ from .config import Settings, get_settings
 
 from .graph import GRAPH_TOOL_NAME, query_bidding_graph
 
+from .intent import classify_intent
+
 from .llm import LLMError, stream_chat
 
 from .logging_setup import get_logger
@@ -119,40 +121,74 @@ def load_skill(name: str) -> str:
         return f"技能「{name}」读取失败：{exc}。请直接依据已有知识回答，不要重试。"
 
 
-def _agent_system_prompt(s: Settings, web_search_enabled: bool = False) -> str:
-    """在 rag 的作答纪律之上，补充「什么时候该调哪个工具」。"""
-    lines = [
-        "工具使用规则：",
-        "1. 问题涉及招标公告原文、招投标项目内容、公司信息、条款措辞、资质描述等「语义/原文」类内容时，"
-        "先调用 search_bidding_knowledge 检索知识库，再依据它返回的参考资料作答。",
-    ]
-    next_no = 2
-    if s.pg_configured:
+def _agent_system_prompt(
+    s: Settings, web_search_enabled: bool = False, intent: str = "unknown"
+) -> str:
+    """在 rag 的作答纪律之上，补充「什么时候该调哪个工具」。
+
+    ``intent`` 是意图路由结果（见 ``app/intent.py``）。非 unknown 时本轮工具被
+    按意图裁剪，所以**每条规则都以「这个工具真的在本轮工具集里」为前提生成**——
+    绝不给模型介绍一个没发给它的工具名，否则它会去调一个不存在的工具。
+    判不准（unknown）时给全量工具与原规则，行为与没有路由时完全一致。
+    """
+    # 本轮真正能调的工具名（按意图 + 配置算，与 _collect_tools 同源）
+    available = {item.name for item in _collect_tools(s, web_search_enabled, intent)}
+
+    lines = ["工具使用规则："]
+    next_no = 1
+    if TOOL_NAME in available:
+        lines.append(
+            f"{next_no}. 问题涉及招标公告原文、招投标项目内容、公司信息、条款措辞、资质描述等「语义/原文」类内容时，"
+            "先调用 search_bidding_knowledge 检索知识库，再依据它返回的参考资料作答。"
+        )
+        next_no += 1
+    if PG_TOOL_NAME in available:
         lines.append(
             f"{next_no}. 问题涉及统计、计数、求和/平均、排序 Top-N、精确条件筛选、多表关联等「结构化/精确」类内容时"
             "（例如「预算超过一千万的项目有几个」「按地区统计公告数量」「某公司中标金额合计」），"
             "调用 query_bidding_postgres 精确查询。"
         )
         next_no += 1
-    if s.graph_configured:
+    if GRAPH_TOOL_NAME in available:
         lines.append(
             f"{next_no}. 问题涉及实体之间的关联、多跳、路径、关系计数等「关系/图谱」类内容时"
             "（例如「有哪些关于空调的采购」「某公司中标了哪些项目」「某项目有哪些参与单位」"
             "「两家公司共同参与过哪些项目」），调用 query_bidding_graph 沿关系查询。"
         )
         next_no += 1
-    if next_no > 3:
+    if next_no > 2:
         lines.append(f"{next_no}. 需要多种视角时，把相应工具都调用，再综合作答。")
         next_no += 1
-    lines += [
+    lines.append(
         f"{next_no}. 与招投标业务无关的闲聊、自我介绍、能力询问等，不要调用工具，直接回答，"
-        "并简要说明你能查什么。",
-        f"{next_no + 1}. 调用工具时可以按需改写检索词（例如补全项目类型、资质关键词），以便命中更准。",
-        f"{next_no + 2}. 引用知识库来源时沿用 [参考资料N] 标注；表格类结论用 Markdown 表格呈现。",
-    ]
+        "并简要说明你能查什么。"
+    )
+    next_no += 1
+    # 这两条只在真的给了知识库工具时才成立，否则等于教模型去引用它没有的来源
+    if TOOL_NAME in available:
+        lines.append(
+            f"{next_no}. 调用工具时可以按需改写检索词（例如补全项目类型、资质关键词），以便命中更准。"
+        )
+        next_no += 1
+        lines.append(
+            f"{next_no}. 引用知识库来源时沿用 [参考资料N] 标注；表格类结论用 Markdown 表格呈现。"
+        )
+        next_no += 1
+    elif GRAPH_TOOL_NAME in available or PG_TOOL_NAME in available:
+        lines.append(f"{next_no}. 统计与关系类结论用 Markdown 表格呈现，并写明查询条件与口径。")
+
+    # 意图路由：裁剪后明确「本轮聚焦哪些工具」，并给出判不准/缺工具时的兜底口径。
+    if intent != "unknown":
+        lines += [
+            "",
+            f"本轮工具已按问题意图「{intent}」聚焦：{', '.join(sorted(available))}。",
+            "若要完成本回答确实还需要未列出的数据源，请在回答中**明确说明你还需要哪类数据、"
+            "用来核对什么口径**（例如「需要 PostgreSQL 统计合计金额」「需要图谱查股权关系」），"
+            "并只用已有工具回答能回答的部分；**绝不因为工具不在就编造该部分结论**。",
+        ]
 
     catalog = _scan_skills()
-    if catalog:
+    if catalog and SKILL_TOOL_NAME in available:
         skill_lines = "\n".join(f"- {entry['name']}：{entry['summary']}" for entry in catalog)
         lines += [
             "",
@@ -162,18 +198,39 @@ def _agent_system_prompt(s: Settings, web_search_enabled: bool = False) -> str:
             "可用技能目录：",
             skill_lines,
         ]
-    if web_search_enabled:
+    if web_search_enabled and WEB_TOOL_NAME in available:
+        # 本轮没给知识库工具时（如 enterprise 意图），联网规则里不能拿
+        # search_bidding_knowledge 当前置条件——那会把模型指向一个不存在的工具。
+        has_kb = TOOL_NAME in available
+        rule_1 = (
+            "1. 本地知识库是存量数据。若 search_bidding_knowledge 返回「知识库中没有找到相关记录」，"
+            "或问题明确要求「最新 / 近期 / 今年 / 最近发布」的招标公告、政府采购信息、法规政策更新，"
+            "必须再调用 search_web_bidding 联网搜索，不要直接回「没有数据」。"
+            if has_kb
+            else "1. 本轮没有本地知识库工具。问题要求「最新 / 近期 / 今年 / 最近发布」的招标公告、"
+            "政府采购信息、法规政策更新，或需要本地数据之外的补充信息时，直接调用 search_web_bidding "
+            "联网搜索，不要直接回「没有数据」。"
+        )
+        rule_2 = (
+            "2. 联网结果比知识库新，但权威性需自行判断；引用时用 [网页N] 标注并给出链接，"
+            "与知识库的 [参考资料N] 分开标注，不要把两者混为一谈。"
+            if has_kb
+            else "2. 联网结果的权威性需自行判断；引用时用 [网页N] 标注并给出链接，给出可核对的出处。"
+        )
+        rule_4 = (
+            "4. 联网搜索也失败或无结果时，如实说明「本地知识库与联网都没有查到」，"
+            "绝不编造公告标题、链接或日期。"
+            if has_kb
+            else "4. 联网搜索失败或无结果时，如实说明「没有查到」，绝不编造公告标题、链接或日期。"
+        )
         lines += [
             "",
             "联网搜索规则（search_web_bidding）：",
-            "1. 本地知识库是存量数据。若 search_bidding_knowledge 返回「知识库中没有找到相关记录」，"
-            "或问题明确要求「最新 / 近期 / 今年 / 最近发布」的招标公告、政府采购信息、法规政策更新，"
-            "必须再调用 search_web_bidding 联网搜索，不要直接回「没有数据」。",
-            "2. 联网结果比知识库新，但权威性需自行判断；引用时用 [网页N] 标注并给出链接，"
-            "与知识库的 [参考资料N] 分开标注，不要把两者混为一谈。",
+            rule_1,
+            rule_2,
             "3. 若联网搜索返回空结果或明显答非所问，请更换关键词再调用一次，最多两次"
             "（例如去掉长尾限定词、换用同义词、只保留主体名称）；两次仍空才按第 4 条处理。",
-            "4. 联网搜索也失败或无结果时，如实说明「本地知识库与联网都没有查到」，绝不编造公告标题、链接或日期。",
+            rule_4,
         ]
     return SYSTEM_PROMPT + "\n\n" + "\n".join(lines)
 
@@ -220,8 +277,24 @@ def _make_chat_model(s: Settings) -> ChatOpenAI:
     )
 
 
-def _collect_tools(s: Settings, use_web: bool) -> list[Any]:
-    """按配置装配本轮可用的工具列表（建图与强制收口共用）。"""
+# 意图 → 本轮允许保留的工具名（意图路由的裁剪表）。
+# 判不准（unknown）不在表内 → 不裁剪、给全量工具，等价于没有路由时的原链路。
+# 联网是「知识库没查到」的兜底，所以 regulation / enterprise 保留；project 走
+# 库内统计与关系，按口径不给联网，避免三类同质化。
+_TRIM_BY_INTENT: dict[str, frozenset[str]] = {
+    "regulation": frozenset({TOOL_NAME, SKILL_TOOL_NAME, WEB_TOOL_NAME}),
+    "enterprise": frozenset({PG_TOOL_NAME, GRAPH_TOOL_NAME, WEB_TOOL_NAME}),
+    "project": frozenset({TOOL_NAME, PG_TOOL_NAME, GRAPH_TOOL_NAME}),
+}
+
+
+def _collect_tools(s: Settings, use_web: bool, intent: str = "unknown") -> list[Any]:
+    """按配置装配本轮可用的工具列表（建图与强制收口共用）。
+
+    ``intent`` 非 unknown 时按意图裁剪（见 ``_TRIM_BY_INTENT``）；裁完为空
+    （例如企业意图但 PG / 图谱都没配）则**退回全量**——「判不准就退回原链路」，
+    宁可多给工具，绝不少给。
+    """
     tools: list[Any] = [search_bidding_knowledge]
     # 技能目录非空才注册（与「未配置的工具不注册」一致：没有技能文件就不给模型这个工具）。
     if _scan_skills():
@@ -232,7 +305,16 @@ def _collect_tools(s: Settings, use_web: bool) -> list[Any]:
         tools.append(query_bidding_graph)
     if use_web:
         tools.append(search_web_bidding)
-    return tools
+
+    wanted = _TRIM_BY_INTENT.get((intent or "unknown").strip().lower())
+    if not wanted:
+        return tools
+    trimmed = [item for item in tools if item.name in wanted]
+    # 裁到一个不剩 = 裁剪结论与实际配置冲突 → 回全量，别把模型饿死。
+    if not trimmed:
+        logger.debug("意图裁剪为空 intent=%s，退回全量工具", intent)
+        return tools
+    return trimmed
 
 
 class _ParallelToolNode(ToolNode):
@@ -301,9 +383,14 @@ class _ParallelToolNode(ToolNode):
         return self._combine_tool_outputs(outputs, input_type)
 
 
-def _build_agent(s: Settings, web_search_enabled: bool = False) -> Any:
-    """构造（并缓存）ReAct Agent。"""
+def _build_agent(s: Settings, web_search_enabled: bool = False, intent: str = "unknown") -> Any:
+    """构造（并缓存）ReAct Agent。
+
+    ``intent`` 必须进缓存键：图里的工具集与系统提示词都按意图裁剪过，
+    同键不同意图会把 A 意图的工具集复用给 B 意图。
+    """
     use_web = bool(web_search_enabled and s.web_search_configured)
+    intent = (intent or "unknown").strip().lower()
     key = (
         s.llm_base_url,
         s.llm_api_key,
@@ -315,20 +402,21 @@ def _build_agent(s: Settings, web_search_enabled: bool = False) -> Any:
         s.graph_configured,
         s.agent_tool_concurrency,
         use_web,
+        intent,
     )
     agent = _agent_cache.get(key)
     if agent is not None:
         return agent
 
     model = _make_chat_model(s)
-    tools = _collect_tools(s, use_web)
+    tools = _collect_tools(s, use_web, intent)
 
     agent = create_react_agent(
         model,
         # 工具节点换成自定义并行版：一轮多个 tool_calls 并发执行（有并发上限），
         # 结果按 tool_calls 原始顺序回填，单工具异常只影响自己。
         tools=_ParallelToolNode(tools, concurrency=s.agent_tool_concurrency),
-        prompt=_agent_system_prompt(s, web_search_enabled=use_web),
+        prompt=_agent_system_prompt(s, web_search_enabled=use_web, intent=intent),
     )
     _agent_cache[key] = agent
     return agent
@@ -703,16 +791,22 @@ async def _forced_finalize_stream(
     *,
     use_web: bool,
     memory_text: str = "",
+    intent: str = "unknown",
 ) -> AsyncIterator[dict[str, Any]]:
     """强制收口轮：禁止工具调用，基于已重放的工具观察流式产出最终文字答案。
 
     产出 thinking / delta 两类事件（收口轮的思维链同样单独一路下发）。
+
+    ``intent`` 只影响提示词与 bind_tools 的工具表（tool_choice=none 本就不会真调），
+    但必须与触发收口的那一跳保持一致，否则收口时会介绍一个不在表里的工具。
     """
-    messages: list[Any] = [SystemMessage(content=_agent_system_prompt(s, web_search_enabled=use_web))]
+    messages: list[Any] = [
+        SystemMessage(content=_agent_system_prompt(s, web_search_enabled=use_web, intent=intent))
+    ]
     messages.extend(_build_messages(question, history, s, memory_text))
     messages.extend(_prune_transcript(turn.get("transcript") or []))
 
-    model = _make_chat_model(s).bind_tools(_collect_tools(s, use_web), tool_choice="none")
+    model = _make_chat_model(s).bind_tools(_collect_tools(s, use_web, intent), tool_choice="none")
     async for chunk in model.astream(messages):
         reasoning = (getattr(chunk, "additional_kwargs", None) or {}).get("reasoning_content")
         if isinstance(reasoning, str) and reasoning:
@@ -742,6 +836,14 @@ async def agent_events(
         yield {"type": "error", "message": "问题不能为空"}
         yield {"type": "done", "mode": "agent_failed"}
         return
+
+    # 意图路由：纯规则零模型调用，判不准一律 unknown → 全量工具（原链路）。
+    # 只有 react 模式据此裁剪工具；plan / deep 的提示词是独立编写的，仍给全量工具。
+    intent = classify_intent(question)
+    metrics_store.bump(f"intent_{intent}", settings=s)
+    if intent == "unknown":
+        metrics_store.bump("intent_fallback", settings=s)
+    logger.info("意图分类 intent=%s question=%r", intent, question)
 
     if not s.agent_configured:
         for event in answer_events(question, settings=s, final_k=final_k, memory_text=memory_text):
@@ -789,7 +891,7 @@ async def agent_events(
     # 语义 = 「最后一次模型调用（含思维链）的耗时」；检索/重排耗时另由 _run_retrieval 累计。
     last_tool_at = time.perf_counter()
     try:
-        agent = _build_agent(s, web_search_enabled=use_web)
+        agent = _build_agent(s, web_search_enabled=use_web, intent=intent)
         last_tool_at = time.perf_counter()
         async for event in _stream_react_turn(
             agent,
@@ -814,7 +916,7 @@ async def agent_events(
         emitted = ""
         try:
             async for event in _forced_finalize_stream(
-                s, question, history, turn, use_web=use_web, memory_text=memory_text
+                s, question, history, turn, use_web=use_web, memory_text=memory_text, intent=intent
             ):
                 if event.get("type") == "delta":
                     piece = str(event.get("text") or "")

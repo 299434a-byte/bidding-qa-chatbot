@@ -111,7 +111,9 @@ def _patch_agent(monkeypatch, model: _FakeFinalizeModel, *, tool_returns: bool =
     monkeypatch.setattr(
         agent_mod,
         "_build_agent",
-        lambda s, web_search_enabled=False: _NeverStopAgent(tool_returns=tool_returns),
+        lambda s, web_search_enabled=False, intent="unknown": _NeverStopAgent(
+            tool_returns=tool_returns
+        ),
     )
     monkeypatch.setattr(agent_mod, "_make_chat_model", lambda s: model)
 
