@@ -1,0 +1,149 @@
+# ============================================================================
+# 数据能力边界 —— 单一事实来源（data_capability.yaml）
+#
+# 【这份文件整体在做什么】
+#   把「当前这批数据到底能回答什么」写成一份可读、可机读的口径说明，供
+#   app/boundary.py 在问答最前面判定「这问题数据根本不覆盖 → 直接拒答」，
+#   而不是让模型拿 15 个月的局部样本硬编一个答案。
+#
+# 【哪些字段谁说了算】
+#   · 手写、ingest 不会动：coverage.province_scope / graph.* / fields.*.note
+#     / fields.*.keywords（这些是「口径说明」，机器算不出来）
+#   · ingest 每次建库结束自动重算并写回：records.*.rows / records.*.chunk_count
+#     / fields.*.missing_rate / coverage.date_from / coverage.date_to /
+#     coverage.months / generated_at
+#   写回用「临时文件 + os.replace」原子替换，读到一半的半成品文件不会出现。
+#
+# 【判据可调】
+#   时间越界 / 地区越界 / 字段缺失(>=0.8) / 图谱越界，阈值在 app/boundary.py；
+#   换语料后必须重新核对本文件（时间范围、省份、缺失率都会变）。
+# ============================================================================
+
+# 生成时间（UTC，ISO8601）。ingest 重算后刷新；用于判断这份口径有多旧。
+generated_at: "2026-10-17T09:36:38Z"
+
+coverage:
+  # 数据里最早 / 最晚的一条业务日期（来自两张表的日期型字段取交集后的并集）
+  date_from: "2023-07-06"
+  date_to: "2024-09-09"
+  # 跨度（含首尾两个自然月）
+  months: 15
+  # 数据只覆盖哪些省级行政区；问题里点名了名单外的省份即视为越界
+  province_scope:
+    - 安徽
+  # 口径说明：地址字段是交易中心名称而非结构化省市区，命中省名 512 条、
+  # 其余 421 条是省内市县（合肥 / 巢湖 / 肥东…），故范围就是安徽一省。
+  province_note: >-
+    地址字段为市/县级公共资源交易中心名称（如「合肥公共资源交易中心」），
+    全部位于安徽省内。
+
+# 每张源表的行数与切出来的文档块数（ingest 重算）
+records:
+  procurement_notices:
+    rows: 933
+    chunk_count: 8573
+  projects:
+    rows: 933
+    chunk_count: 933
+
+# 每张表每个字段的缺失率。missing_rate >= 0.8 且问题点名了该字段 → 拦截。
+# keywords 是「用户会怎么问到这个字段」；没写 keywords 的字段即使缺失率高也
+# 不会触发拦截（判不准就不拦，宁可放行也不误拒）。
+fields:
+  procurement_notices:
+    project_name:
+      missing_rate: 0.0
+      note: 主键，形如「项目名称」，同时是 procurement_notices 与 projects 的关联键。
+    address:
+      missing_rate: 0.0
+      note: 项目所在市/县（公共资源交易中心名称），非结构化地址。
+    purchaser:
+      missing_rate: 0.0
+      note: 采购人名称。
+      keywords: [采购人, 采购单位, 甲方]
+    procurement_date:
+      missing_rate: 0.0
+      note: 采购日期（日期型），与 projects.project_date 共同决定 coverage 时间范围。
+    title:
+      missing_rate: 0.0
+      note: 公告标题。
+    content:
+      missing_rate: 0.0
+      note: 公告正文，平均约 2800 字，是文档切块的主要来源。
+      keywords: [正文, 公告内容, 详情]
+    attachment_file_name:
+      missing_rate: 0.0
+      note: 附件文件名。
+    attachment_file_link:
+      missing_rate: 0.0
+      note: 附件下载链接。
+      keywords: [附件, 下载链接]
+  projects:
+    project_name:
+      missing_rate: 0.0
+      note: 主键，与 procurement_notices.project_name 对应。
+    project_type:
+      missing_rate: 0.0
+      note: 项目类型，当前语料只有「工程建设」一个取值。
+      keywords: [项目类型, 类型, 什么类别]
+    project_id:
+      missing_rate: 0.0
+      note: 项目编号（形如 2024BFAAZ01297）。
+      keywords: [编号, 项目号, 立项号]
+    project_progress:
+      missing_rate: 0.0
+      note: 项目进度 / 阶段。
+      keywords: [进度, 进展, 阶段, 到哪一步]
+    approval_name:
+      missing_rate: 0.0
+      note: 立项 / 批复名称。
+    approval_department:
+      missing_rate: 0.0
+      note: 审批部门。
+      keywords: [审批, 批复单位, 主管部门]
+    platform:
+      missing_rate: 0.0
+      note: 交易平台名称。
+      keywords: [平台, 交易平台, 在哪买]
+    budget_amount:
+      missing_rate: 0.0
+      note: 预算金额（数值型），单位见 budget_amount_unit，当前语料恒为「万」。
+      keywords: [预算, 预算金额, 金额, 造价, 经费, 多少钱]
+    budget_amount_unit:
+      missing_rate: 0.0
+      note: 预算金额单位，当前语料全部为「万」。
+      keywords: [单位, 万元, 多少万]
+    method:
+      missing_rate: 0.0
+      note: 采购方式。
+      keywords: [采购方式, 方式, 公开招标, 竞争性谈判]
+    department_num:
+      missing_rate: 0.0
+      note: 采购部门编号。
+    department_name:
+      missing_rate: 0.0
+      note: 采购部门名称。
+      keywords: [部门, 采购部门, 处室]
+    agency:
+      missing_rate: 0.0
+      note: 代理机构名称。
+      keywords: [代理, 代理机构, 招标代理, 中介]
+    project_date:
+      missing_rate: 0.0
+      note: 项目日期（日期型），与 procurement_notices.procurement_date 共同决定 coverage 时间范围。
+
+# 知识图谱的覆盖口径（与向量库同源，都是上面两张表）
+graph:
+  labels:
+    - Project
+    - Notice
+  relations:
+    - PUBLISHED
+  # 图谱里没有的东西：问到这些且带「关系」类问法 → 拦截
+  not_covered:
+    - 公司
+    - 供应商
+    - 股权
+  note: >-
+    图谱只有项目 / 公告两类节点和一条 PUBLISHED 关系，没有公司主体节点，
+    也没有股权、供应链、投资等关系边。

@@ -186,7 +186,9 @@ export default function Home() {
         return {
           id: item.id,
           role: "assistant" as const,
-          content: item.content,
+          // 数据边界拒答：后端存的正文就是那段统一拒答文案，交给边界卡来呈现，
+          // 正文留空 —— 免得刷新后同一段话在正文和卡片里各说一遍。
+          content: meta?.boundary ? "" : item.content,
           ts: item.created_at ? parseTs(item.created_at)?.getTime() ?? null : null,
           mode: meta?.done_mode ?? meta?.mode ?? res.conversation.mode,
           toolCalls,
@@ -236,6 +238,8 @@ export default function Home() {
           cacheHit: meta?.done_mode === "cache",
           // 澄清卡片回放：刷新后仍可点选项继续问
           clarify: meta?.clarify ?? undefined,
+          // 数据边界卡回放：刷新后仍能看到拒答原因、真实口径与可点的替代问法
+          boundary: meta?.boundary ?? undefined,
           // 历史里只存了错误原文，包成结构化错误块（人话 + 技术详情折叠）
           error: meta?.error
             ? { kind: "server" as const, message: "该回答生成时出错了。", detail: meta.error }
@@ -526,6 +530,18 @@ export default function Home() {
           else if (event.type === "clarify")
             // 澄清卡片：问题歧义时后端直接给澄清提问与候选选项（不检索不调模型）
             patch((msg) => ({ ...msg, clarify: { question: event.question, options: event.options } }));
+          else if (event.type === "boundary_blocked")
+            // 数据边界卡：数据不覆盖时后端不检索不调模型直接拒答（信息卡，非错误态）
+            patch((msg) => ({
+              ...msg,
+              boundary: {
+                rule: event.rule,
+                reason: event.reason,
+                real_scope: event.real_scope,
+                suggestion: event.suggestion ?? [],
+                message: event.message,
+              },
+            }));
           else if (event.type === "done") {
             // 结束前先把缓冲里的最后一段 delta 冲刷出来，再收尾状态
             flushNow();

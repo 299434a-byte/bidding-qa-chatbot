@@ -18,6 +18,8 @@ from typing import Any, Callable
 
 from .bm25 import BM25Index, tokenize
 
+from .capability import new_tracker, observe_rows, summarize_table, write_capability
+
 from .config import Settings, get_settings
 
 from .db import DatabaseUnavailable, discover_schema, iter_rows, mysql_connection
@@ -68,6 +70,8 @@ def generate_documents(
         "warnings": [],
         "documents": 0,
         "cleaning": {},
+        # 数据能力口径（行数 / 缺失率 / 时间范围）：边读边攒，建库结束写回 yaml
+        "capability": {},
     }
     documents: list[Document] = []
     token_lists: list[list[str]] = []
@@ -132,8 +136,11 @@ def generate_documents(
             report(source_label, f"读取 {table}（{label}）…", table=table)
             doc_count = 0
             columns = _columns_for_docs(info["columns"])
+            # 统计器只「看」不「改」：包在源数据外面，边读边攒行数 / 缺失率 / 日期范围，
+            # 文档化逻辑一行不动。建库结束时这些数字会写回 data_capability.yaml。
+            tracker = new_tracker(columns)
             for doc in build_documents(
-                _iter(conn, table),
+                observe_rows(_iter(conn, table), tracker),
                 columns,
                 table=table,
                 label=label,
@@ -152,6 +159,7 @@ def generate_documents(
                 "documents": doc_count,
                 "error": None,
             }
+            stage_summary["capability"][table] = summarize_table(tracker, doc_count)
             report(
                 source_label,
                 f"{table}（{label}）：{info.get('row_count', 0)} 行 → {doc_count} 个文档块",
@@ -170,6 +178,20 @@ def generate_documents(
             cleaning["truncated_fields"],
         )
     return documents, token_lists, stage_summary
+
+
+def _refresh_capability(stage: dict[str, Any], s: Settings, report: ProgressFn | None = None) -> None:
+    """建库结束：重算数据能力口径并原子写回 data_capability.yaml。
+
+    口径写不进去只记 warning —— 旧口径照样能用，绝不能把整次建库拖下水。
+    """
+    try:
+        path = write_capability(stage.get("capability") or {}, s)
+    except Exception as exc:  # noqa: BLE001 - 写文件失败不影响建库结果
+        logger.warning("数据能力口径写回失败（本次建库结果不受影响）：%s", exc)
+        return
+    if path and report:
+        report("capability", f"数据能力口径已更新：{path.name}")
 
 
 def run_ingest(
@@ -252,6 +274,7 @@ def run_ingest(
         updated=summary.get("updated"),
         deleted=summary.get("deleted"),
     )
+    _refresh_capability(_stage, s, report)
     return summary
 
 
@@ -373,6 +396,7 @@ def run_incremental(
         updated=summary.get("updated"),
         deleted=summary.get("deleted"),
     )
+    _refresh_capability(stage, s, report)
     return summary
 
 

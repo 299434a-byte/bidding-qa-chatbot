@@ -23,3 +23,5 @@ zai-sdk==0.2.3
 python-multipart==0.0.32
 # 联网搜索工具（Tavily；不配 TAVILY_API_KEY 时工具不注册）
 tavily-python==0.8.4
+# 数据能力边界文件（app/data_capability.yaml）的解析；读失败时闸门降级为不拦截
+PyYAML==6.0.3

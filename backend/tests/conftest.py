@@ -90,6 +90,11 @@ _FAKE_ENV = {
     "HISTORY_DB_PATH": str(_SANDBOX / "conversations.db"),
     # ---- 长期记忆画像：一个用户一个 JSON，同样只落在沙箱 ----
     "MEMORY_DIR": str(_SANDBOX / "memory"),
+    # ---- 数据能力边界口径文件：指到沙箱里一个**故意不存在**的路径 →
+    #      load_capability() 恒返回 {} → 闸门恒「不拦截」。这样既不会因为
+    #      测试进程读到仓库里那份真实口径（里面写着近五年/未来年份会拦）而误伤
+    #      存量用例，又能保证「读失败降级为不拦截」这条铁律天天被走到。 ----
+    "DATA_CAPABILITY_PATH": str(_SANDBOX / "data_capability.yaml"),
     # ---- 问答缓存 / 指标 / 日志：同样指向沙箱，避免测试污染真实文件 ----
     "CACHE_DB_PATH": str(_SANDBOX / "answer_cache.db"),
     "METRICS_DB_PATH": str(_SANDBOX / "metrics.db"),

@@ -7,6 +7,7 @@ import AuditPanel from "@/components/chat/AuditPanel";
 import { mdToHtml } from "@/lib/markdown";
 import { formatHm } from "@/lib/timefmt";
 import type {
+  BoundaryInfo,
   CitationIssue,
   ClarifyInfo,
   GraphQueryInfo,
@@ -75,6 +76,8 @@ export type Message = {
   cacheHit?: boolean;
   /** 澄清卡片（clarify 事件）：问题歧义时先问清楚，点选项即作为新问题发送 */
   clarify?: ClarifyInfo;
+  /** 数据边界卡片（boundary_blocked 事件）：数据不覆盖时的拒答说明与替代问法 */
+  boundary?: BoundaryInfo;
   revisionByCitation?: boolean;
   adoptedVersion?: "v1" | "v2";
   mode?: string;
@@ -368,8 +371,41 @@ function MessageBubble({ msg, highlighted, busy, onFillInput, onAdopt, onOpenEvi
               </div>
             )}
 
+            {/* 数据边界卡：数据根本不覆盖时的拒答说明 —— 信息卡样式（不是红框错误块），
+                三段信息：为什么拒 / 数据真实覆盖到哪 / 2~3 条不越界的替代问法（点一条即发送）。 */}
+            {msg.boundary && (
+              <div className="boundary-card" data-testid="boundary">
+                <div className="plan-card-head">
+                  <span className="badge badge-plain">数据边界</span>
+                  <span className="badge badge-plain">超出覆盖范围 · 未作答</span>
+                </div>
+                <div className="boundary-reason">{msg.boundary.reason}</div>
+                {msg.boundary.real_scope && (
+                  <div className="boundary-scope">
+                    <span className="boundary-label">真实口径</span>
+                    <span className="boundary-scope-text">{msg.boundary.real_scope}</span>
+                  </div>
+                )}
+                {msg.boundary.suggestion.length > 0 && (
+                  <div className="clarify-options">
+                    {msg.boundary.suggestion.map((option) => (
+                      <button
+                        key={option}
+                        className="chip"
+                        type="button"
+                        disabled={busy}
+                        onClick={() => onClarifyPick?.(option)}
+                      >
+                        {option}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* 首 token 前：骨架行占位（内容来了就消失） */}
-            {msg.streaming && !msg.content && !msg.aborted && !msg.clarify && (
+            {msg.streaming && !msg.content && !msg.aborted && !msg.clarify && !msg.boundary && (
               <div aria-hidden="true">
                 <div className="skeleton skel-line" />
                 <div className="skeleton skel-line" />

@@ -36,6 +36,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from . import auth, history as history_store
 from . import memory as memory_store
 from . import ratelimit
+from .boundary import check_boundary, load_capability
 from .clarify import needs_clarification
 from .agent import MODES, TOOL_NAME, agent_events
 
@@ -201,6 +202,8 @@ class _EventCollector:
         self.supported_sentences: int | None = None
         self.total_sentences: int | None = None
         self.hallucination_flags: list[dict[str, Any]] = []
+        # 数据边界（纯新增）：数据不覆盖被拒答时的口径，随 meta 落库供刷新后回放
+        self.boundary: dict[str, Any] | None = None
 
     def feed(self, event: dict[str, Any]) -> None:
         etype = event.get("type")
@@ -267,6 +270,15 @@ class _EventCollector:
                 self.revision.append(text)
             else:
                 self.answer.append(text)
+        elif etype == "boundary_blocked":
+            # 数据边界：把拒答原因 / 真实口径 / 替代问法原样留档（纯新增事件类型）
+            self.boundary = {
+                "rule": event.get("rule"),
+                "reason": event.get("reason"),
+                "real_scope": event.get("real_scope"),
+                "suggestion": list(event.get("suggestion") or []),
+                "message": event.get("message"),
+            }
         elif etype == "error":
             self.error = event.get("message")
         elif etype == "citation_check":
@@ -310,6 +322,8 @@ class _EventCollector:
             "total_sentences": self.total_sentences,
             "hallucination_flags": self.hallucination_flags,
             "phase_timings": self.phase_timings,
+            # 数据边界回放数据（纯新增）：刷新后历史消息仍能看到为什么被拒答
+            "boundary": self.boundary,
         }
 
 
@@ -1012,6 +1026,22 @@ def _followup_evidence(conversation_id: str, s: Settings) -> list[dict[str, Any]
     return list(evidence["sources"])
 
 
+def _boundary_event(verdict: dict[str, Any]) -> dict[str, Any]:
+    """把闸门结论压成 SSE 事件。
+
+    这是**纯新增**的事件类型：老前端 / 不认识它的前端按契约直接忽略，
+    字段只增不改，拒答文案一律来自 data_capability.yaml + boundary 的统一模板。
+    """
+    return {
+        "type": "boundary_blocked",
+        "rule": str(verdict.get("rule") or ""),
+        "reason": str(verdict.get("reason") or ""),
+        "real_scope": str(verdict.get("real_scope") or ""),
+        "suggestion": [str(x) for x in (verdict.get("suggestion") or [])],
+        "message": str(verdict.get("message") or ""),
+    }
+
+
 @app.post("/api/chat")
 def chat(
     payload: ChatRequest,
@@ -1026,9 +1056,13 @@ def chat(
     request_started = time.perf_counter()
     logged_in = bool(user)
     memory_text = _memory_summary(user, s)
+    # —— 数据边界闸门（最前面判定）：数据根本不覆盖的问题直接拒答 ——
+    # 不检索、不调模型、不吃缓存也不写缓存；读能力文件失败时闸门自己降级为不拦截。
+    verdict = check_boundary(payload.question, load_capability(s))
+    blocked = bool(verdict.get("blocked"))
     # 指定模型的请求不吃默认模型的缓存（缓存键不含模型，共用会串答案），也不写入。
     model_override = bool((payload.model or "").strip())
-    cacheable = (not model_override) and answer_cache.is_cacheable(
+    cacheable = (not blocked) and (not model_override) and answer_cache.is_cacheable(
         logged_in=logged_in,
         mode="llm",
         has_history=False,
@@ -1038,7 +1072,8 @@ def chat(
     )
     cached = (
         answer_cache.get_cached(payload.question, s, mode="llm", top_k=payload.top_k)
-        if (not model_override)
+        if (not blocked)
+        and (not model_override)
         and answer_cache.is_cache_readable(
             logged_in=logged_in, mode="llm", has_image=False, question=payload.question
         )
@@ -1054,6 +1089,14 @@ def chat(
         rerank_failed = False
         rerank_skipped = False
         confidence: float | None = None
+
+        if blocked:
+            # 数据边界：不检索、不调模型、连缓存都不读，直接出口径卡
+            metrics_store.bump("boundary_blocked", settings=s)
+            yield _sse(_boundary_event(verdict))
+            yield _sse({"type": "done", "mode": "boundary_blocked"})
+            yield "data: [DONE]\n\n"
+            return
 
         if cached is not None:
             yield _sse({"type": "cache_hit"})
@@ -1153,7 +1196,13 @@ async def agent_chat(
 
     persist = bool(user and s.history_configured)
 
-    # —— 对话澄清（最前面判定）：问题歧义时不检索、不调模型、不吃缓存 ——
+    # —— 数据边界闸门（最前面判定）：数据不覆盖的问题先拒，歧义澄清都排在它后面 ——
+    # 判不准 / 能力文件读不到 → blocked=False → 一行代码都不改地走原链路。
+    verdict = check_boundary(payload.question, load_capability(s))
+    blocked = bool(verdict.get("blocked"))
+    boundary_event = _boundary_event(verdict)
+
+    # —— 对话澄清（第二顺位）：问题歧义时不检索、不调模型、不吃缓存 ——
     clarify = needs_clarification(payload.question, has_history=bool(history))
     clarify_needed = bool(clarify.get("needed"))
 
@@ -1163,7 +1212,7 @@ async def agent_chat(
     use_web = bool(use_web and s.web_search_configured)
     # 指定模型的请求不吃默认模型的缓存（缓存键不含模型，共用会串答案），也不写入。
     model_override = bool((payload.model or "").strip())
-    cacheable = (not clarify_needed) and (not model_override) and answer_cache.is_cacheable(
+    cacheable = (not blocked) and (not clarify_needed) and (not model_override) and answer_cache.is_cacheable(
         logged_in=bool(user),
         mode=mode,
         has_history=bool(history),
@@ -1173,7 +1222,8 @@ async def agent_chat(
     )
     cached = (
         answer_cache.get_cached(payload.question, s, mode=mode, top_k=payload.top_k)
-        if (not clarify_needed)
+        if (not blocked)
+        and (not clarify_needed)
         and (not model_override)
         and answer_cache.is_cache_readable(
             logged_in=bool(user), mode=mode, has_image=False, question=payload.question
@@ -1216,6 +1266,32 @@ async def agent_chat(
                 "saved": conversation is not None,
             }
         )
+
+        # —— 数据边界：数据不覆盖时不检索、不调模型，发 boundary_blocked 后直接 done ——
+        if blocked:
+            metrics_store.bump("boundary_blocked", settings=s)
+            collector.feed(boundary_event)
+            collector.feed({"type": "done", "mode": "boundary_blocked"})
+            yield _sse(boundary_event)
+            yield _sse({"type": "done", "mode": "boundary_blocked"})
+            if conversation is not None:
+                try:
+                    # 拒答轮也落库：正文存统一模板的拒答文案，meta 存完整口径，
+                    # 刷新后前端照样能回放这张边界卡。
+                    await asyncio.to_thread(
+                        history_store.append_message,
+                        s,
+                        user["id"],
+                        conversation["id"],
+                        "assistant",
+                        boundary_event.get("message") or payload.question,
+                        collector.meta(mode),
+                        mode,
+                    )
+                except Exception:  # noqa: BLE001 - 落库失败绝不影响问答
+                    pass
+            yield "data: [DONE]\n\n"
+            return
 
         # —— 对话澄清：问题歧义时不检索、不调模型，发 clarify 事件后直接 done ——
         if clarify_needed:

@@ -1555,6 +1555,42 @@ button.cite:active {
   gap: var(--sp-8);
 }
 
+/* ---------------- 数据边界卡片 ----------------
+   数据不覆盖时的拒答说明。刻意做成中性信息卡（跟澄清卡同族、边框更淡），
+   不是红框错误块 —— 拒答是「如实说明数据边界」，不是「服务出错了」。 */
+.boundary-card {
+  border: 1px solid var(--neutral-200);
+  border-radius: var(--r-10);
+  background: var(--neutral-50);
+  padding: var(--sp-12);
+  margin-bottom: var(--sp-12);
+}
+
+.boundary-reason {
+  font-size: var(--text-13);
+  color: var(--neutral-800);
+  margin-bottom: var(--sp-8);
+}
+
+/* 真实口径一行：标签 + 内容（会换行，故用 flex + wrap） */
+.boundary-scope {
+  display: flex;
+  gap: var(--sp-8);
+  align-items: baseline;
+  flex-wrap: wrap;
+  font-size: var(--text-12);
+  margin-bottom: var(--sp-8);
+}
+
+.boundary-label {
+  color: var(--neutral-400);
+  white-space: nowrap;
+}
+
+.boundary-scope-text {
+  color: var(--neutral-600);
+}
+
 /* ---------------- 长期记忆看板（/memory） ---------------- */
 .memory-empty {
   font-size: var(--text-13);

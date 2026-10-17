@@ -73,6 +73,8 @@ COUNTER_NAMES = (
     "followup_reused",
     "retrieval_skipped",
     "clarify_count",
+    # 数据边界闸门：数据不覆盖、直接拒答（不检索不调模型）的次数
+    "boundary_blocked",
     # 意图路由：问题被归到哪一类；intent_fallback = 判不准、已退回全量工具
     "intent_regulation",
     "intent_enterprise",
@@ -279,6 +281,7 @@ def summary(settings: Settings | None = None) -> dict[str, Any]:
         "followup_reused": 0,
         "retrieval_skipped": 0,
         "clarify_count": 0,
+        "boundary_blocked": 0,
         "intent_regulation": 0,
         "intent_enterprise": 0,
         "intent_project": 0,
@@ -376,6 +379,8 @@ def summary(settings: Settings | None = None) -> dict[str, Any]:
             "retrieval_skipped": counters.get("retrieval_skipped", 0),
             # 对话澄清：问题歧义时先发 clarify 事件、不检索不调模型的次数
             "clarify_count": counters.get("clarify_count", 0),
+            # 数据边界闸门：数据不覆盖而直接拒答的次数（不检索、不调模型）
+            "boundary_blocked": counters.get("boundary_blocked", 0),
             # 意图路由：各意图命中次数 + 判不准退回全量工具的次数
             "intent_regulation": counters.get("intent_regulation", 0),
             "intent_enterprise": counters.get("intent_enterprise", 0),

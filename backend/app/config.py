@@ -211,6 +211,10 @@ class Settings:
     memory_enabled: bool
     memory_dir: Path
 
+    # 数据能力边界（data_capability.yaml）——问答最前面那道闸门读的口径文件。
+    # 文件不存在 / 读失败时闸门降级为「不拦截」，所以这个路径指错也绝不会误拒。
+    data_capability_path: Path
+
     auth_enabled: bool
     auth_token_ttl_days: int
     auth_pbkdf2_iterations: int
@@ -425,6 +429,7 @@ def _build_settings() -> Settings:
         history_max_message_chars=_int("HISTORY_MAX_MESSAGE_CHARS", 20000),
         memory_enabled=_bool("MEMORY_ENABLED", True),
         memory_dir=_path("MEMORY_DIR", "./data/memory"),
+        data_capability_path=_path("DATA_CAPABILITY_PATH", "./backend/app/data_capability.yaml"),
         auth_enabled=_bool("AUTH_ENABLED", True),
         auth_token_ttl_days=_int("AUTH_TOKEN_TTL_DAYS", 30),
         auth_pbkdf2_iterations=_int("AUTH_PBKDF2_ITERATIONS", 200000),

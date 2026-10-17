@@ -166,6 +166,8 @@ export type HistoryMeta = {
   phase_timings?: PhaseTimings | null;
   /** 澄清卡片回放数据（新增字段，旧历史没有）：澄清提问 + 候选选项 */
   clarify?: ClarifyInfo | null;
+  /** 数据边界回放数据（新增字段，旧历史没有）：拒答原因 / 真实口径 / 替代问法 */
+  boundary?: BoundaryInfo | null;
 };
 
 export type HistoryMessage = {
@@ -263,6 +265,19 @@ export type ClarifyInfo = {
   options: string[];
 };
 
+/**
+ * 数据边界（boundary_blocked 事件，纯新增字段）：这问题的数据根本不在库里，
+ * 后端不检索不调模型直接拒答。reason 是拒答原因，real_scope 是真实口径，
+ * suggestion 是 2~3 条**不越界**的替代问法（点一条即可重新发送）。
+ */
+export type BoundaryInfo = {
+  rule: string;
+  reason: string;
+  real_scope: string;
+  suggestion: string[];
+  message: string;
+};
+
 export type Source = {
   doc_id: string;
   table: string;
@@ -350,6 +365,11 @@ export type ChatEvent =
   | { type: "cache_hit" }
   /** 对话澄清：问题歧义时后端不检索不调模型，直接给澄清提问与候选选项 */
   | { type: "clarify"; question: string; options: string[] }
+  /**
+   * 数据边界：数据不覆盖的问题，后端不检索不调模型直接拒答（信息卡，非错误态）。
+   * 事件类型与字段都只增不改；遇到不认识的事件前端一律忽略。
+   */
+  | { type: "boundary_blocked"; rule: string; reason: string; real_scope: string; suggestion: string[]; message: string }
   | { type: "no_gain"; reason: string; round: number }
   | { type: "error"; message: string }
   | ConversationEvent
