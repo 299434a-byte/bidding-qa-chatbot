@@ -65,7 +65,14 @@ CREATE TABLE IF NOT EXISTS qa_budget_metrics (
 BUDGET_ACCOUNTS = ("tool_calls", "retrievals", "llm_calls", "time_seconds")
 
 # summary 里输出的事件计数名（顶层字段与 key 同名）。
-COUNTER_NAMES = ("forced_finalize", "coverage_refused", "coverage_pass", "no_gain_stop", "followup_reused")
+COUNTER_NAMES = (
+    "forced_finalize",
+    "coverage_refused",
+    "coverage_pass",
+    "no_gain_stop",
+    "followup_reused",
+    "retrieval_skipped",
+)
 
 _schema_ready: set[str] = set()
 _schema_lock = threading.Lock()
@@ -253,6 +260,7 @@ def summary(settings: Settings | None = None) -> dict[str, Any]:
         "coverage_pass": 0,
         "no_gain_stop": 0,
         "followup_reused": 0,
+        "retrieval_skipped": 0,
         "budget": empty_budget,
     }
     try:
@@ -336,6 +344,8 @@ def summary(settings: Settings | None = None) -> dict[str, Any]:
             "coverage_pass": counters.get("coverage_pass", 0),
             "no_gain_stop": counters.get("no_gain_stop", 0),
             "followup_reused": counters.get("followup_reused", 0),
+            # Self-RAG 检索判定：寒暄类问题跳过检索的次数（retrieval.meta.skipped_retrieval）
+            "retrieval_skipped": counters.get("retrieval_skipped", 0),
             "budget": budget,
         }
     except Exception:

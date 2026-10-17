@@ -1,7 +1,8 @@
 
-"""rag：RAG 主编排（检索 → 重排 → 组装提示词 → 流式生成，含引用兜底）。
+"""rag：RAG 主编排（检索判定 → 检索 → 重排 → 组装提示词 → 流式生成，含引用兜底）。
 
 职责：
+  - Self-RAG 检索判定（needs_retrieval）：寒暄/致谢/元问题/纯算术/改写指令不进检索
   - 调 retriever / rerank 得到证据块，组装带来源约束的系统提示词
   - 覆盖率闸门：检索块与问题关键词重合度不足时拒绝进入生成（防答非所问）
   - 流式生成回答并做引用校验（检索无结果时输出 REF_1 标准文案），
@@ -14,6 +15,10 @@
 """
 
 from __future__ import annotations
+
+import re
+
+import unicodedata
 
 from typing import Any, Iterator
 
@@ -55,6 +60,112 @@ COVERAGE_REFUSAL_MESSAGE = (
     "- 换更具体的关键词重问（如项目名称、编号、公告标题）；\n"
     "- 开启联网搜索，补充时效性信息；\n"
     "- 或切换图谱查询，查实体之间的关系。"
+)
+
+# ============================ Self-RAG 检索判定（规则表） ============================
+# 命中下列规则的「整句」明确不需要检索；其余一律 True —— 宁可多检索，不可漏检索。
+# 所有匹配都在 NFKC 归一（全角→半角）+ 去掉句末标点后的整句（fullmatch）上做，
+# 保证「招标方是谁」不会被「你是谁」的子串规则误伤。
+
+# 寒暄：单独一句问候（可带语气词）
+_GREETING_RE = re.compile(
+    r"(?:你?好|您好|hi|hello|hey|howdy|哈喽|嗨|yo"
+    r"|早上好|早安|上午好|中午好|下午好|晚上好|在吗|在不在|在么)"
+    r"[呀啊哦嘛嗯~～!！\s]*",
+    re.IGNORECASE,
+)
+
+# 致谢 / 客套收尾
+_THANKS_RE = re.compile(
+    r"(?:(?:你好|您好|好的?|太|真是)\s*)?"
+    r"(?:谢谢|多谢|感谢|thank you|thanks)"
+    r"(?:你|您){0,2}[呀啊啦咯哦了嗯~～!！\s]*"
+    r"|辛苦了[~～!！\s]*",
+    re.IGNORECASE,
+)
+
+# 语气词应答（嗯 / 好的 / 收到 …）：允许多个词连用，词尾可带「了/的/啦」等语气字
+_ACK_RE = re.compile(
+    r"(?:(?:嗯|哦|噢|好|行|收到|知道了|明白|了解|可以|ok|okay)"
+    r"[的了呀啊啦咯哦嘛呢~～!！\s]*)+",
+    re.IGNORECASE,
+)
+
+# 元问题：问「你是谁 / 你能做什么 / 怎么用」这类机器人本身的话题
+_META_RE = re.compile(
+    r"(?:你是谁|你叫什么(?:名字)?|你是什么(?:系统|机器人|助手|工具)?|你是ai吗"
+    r"|你能做什么|你能干什么|你会(?:做)?什么|你能干吗|你能帮我做什么"
+    r"|你有什么(?:功能|本事|用)|你的(?:功能|用途)是什么"
+    r"|怎么(?:用|使用)(?:你|这个)|如何(?:使用|操作)(?:你|这个)"
+    r"|使用(?:说明|指南|方法)|操作说明|帮助|help"
+    r"|介绍(?:一)?下?(?:你|你们)自己|你(?:的)?名字是什么)"
+    r"[呀啊哦嘛吗呢~～?？!！\s]*",
+    re.IGNORECASE,
+)
+
+# 改写上一条的指令（「换个说法」「再短一点」……），允许前面带「帮我把xxx」类前缀
+_REWRITE_RE = re.compile(
+    r"(?:帮我)?(?:把|将)?[一-鿿]{0,12}?"
+    r"(?:换个说法|换种说法|换个讲法|换个问法|换一种说法|换个表达(?:方式)?"
+    r"|重新(?:回答|说|讲|表述|组织|生成|写)|再说一遍|重说一遍|再说下?一次"
+    r"|再(?:短|长|简洁|详细|简单|精简)(?:一)?点(?:儿)?"
+    r"|说得?(?:更)?(?:简短|简洁|详细|简单|清楚|明白)(?:一)?点(?:儿)?"
+    r"|简短一点|长话短说|展开(?:说说|讲讲|一下|一点))"
+    r"[呀啊啦咯哦嘛呢~～!！\s]*"
+)
+
+# 纯算术表达式的字符集（数字、四则运算符号与括号）；运算符用于要求「至少有一个运算」
+_ARITH_BODY_RE = re.compile(r"[-+*/×÷=()\d\s.（）％%]+")
+_ARITH_OPERATOR_RE = re.compile(r"[-+*/×÷]")
+
+# 判定前剥掉的句末标点与「等于几 / 是多少」类后缀
+_TRAILING_JUNK_RE = re.compile(r"[\s。．.,，!！?？~～、;；:：…]+$")
+_ARITH_SUFFIX_RE = re.compile(r"(?:等于|是)\s*(?:几|多少)?[吗呢嘛?？]*\s*$")
+
+
+def _looks_arithmetic(compact: str) -> bool:
+    """「1+1」「100-25 等于多少」这类纯算术表达式（必须至少含一个运算符）。"""
+    body = _ARITH_SUFFIX_RE.sub("", compact).strip()
+    if not body or not _ARITH_BODY_RE.fullmatch(body):
+        return False
+    # 只有数字（如「2024」）不算算术题——它更可能是想问那一年的公告，保守放行检索。
+    return bool(_ARITH_OPERATOR_RE.search(body))
+
+
+def needs_retrieval(question: str) -> bool:
+    """判断这个问题要不要进知识库检索（规则优先；判不准一律 True 走原链路）。
+
+    直接返回 ``False`` 的类别：寒暄、致谢客套、问机器人本身的元问题、
+    纯算术表达式、「改写上一条」类指令、语气词应答。
+    其余（含规则打半转的混合问题，如「你好，请问最近有哪些公告」）一律 ``True``
+    —— 宁可多检索，不可漏检索。
+    """
+    normalized = unicodedata.normalize("NFKC", question or "").strip()
+    compact = _TRAILING_JUNK_RE.sub("", normalized).strip()
+    if not compact:
+        return True
+    return not (
+        _GREETING_RE.fullmatch(compact)
+        or _THANKS_RE.fullmatch(compact)
+        or _ACK_RE.fullmatch(compact)
+        or _META_RE.fullmatch(compact)
+        or _looks_arithmetic(compact)
+        or _REWRITE_RE.fullmatch(compact)
+    )
+
+
+# 跳过检索的直答提示词：明确告诉模型「这题不用查资料」，避免它套用
+# 「只依据参考资料」的纪律生硬拒答。
+DIRECT_CHAT_SYSTEM_PROMPT = (
+    "你是「招投标智能问答助手」，当前问题不需要查询知识库"
+    "（例如打招呼、致谢、能力询问、简单算术或改写表述）。\n"
+    "请直接、简短、友好地回答，不要检索资料，也不要编造任何招投标数据。"
+)
+
+# 未配置大模型时直答通道的固定说明（如实降级，不假装检索过）。
+NO_LLM_DIRECT_MESSAGE = (
+    "当前处于**仅检索模式**（未配置大模型），无法生成自然语言回答。"
+    "配置 `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` 后即可正常对话。"
 )
 
 
@@ -120,6 +231,35 @@ def retrieval_only_answer(sources: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _stream_direct_answer(question: str, s: Settings) -> Iterator[dict[str, Any]]:
+    """不需要检索的直答通道：跳过检索/来源/引用校验，直接生成一句寒暄类回复。
+
+    事件顺序：delta("") → delta* → done(mode="direct")；``done`` 带
+    ``skipped_retrieval=true``，且绝不出现 sources / citation_check。
+    """
+    yield {"type": "delta", "text": ""}
+    if not s.llm_configured:
+        yield {"type": "delta", "text": NO_LLM_DIRECT_MESSAGE}
+        yield {"type": "done", "mode": "direct", "skipped_retrieval": True}
+        return
+    messages = [
+        {"role": "system", "content": DIRECT_CHAT_SYSTEM_PROMPT},
+        {"role": "user", "content": question},
+    ]
+    try:
+        for piece in stream_chat(messages, s):
+            yield {"type": "delta", "text": piece}
+    except LLMNotConfigured:
+        yield {"type": "delta", "text": NO_LLM_DIRECT_MESSAGE}
+        yield {"type": "done", "mode": "direct", "skipped_retrieval": True}
+        return
+    except LLMError as exc:
+        yield {"type": "error", "message": str(exc)}
+        yield {"type": "done", "mode": "llm_failed", "skipped_retrieval": True}
+        return
+    yield {"type": "done", "mode": "direct", "skipped_retrieval": True}
+
+
 def answer_events(
     question: str,
     settings: Settings | None = None,
@@ -127,6 +267,23 @@ def answer_events(
 ) -> Iterator[dict[str, Any]]:
     """完整的问答事件流。"""
     s = settings or get_settings()
+
+    if not needs_retrieval(question):
+        # Self-RAG 检索判定：寒暄/致谢/元问题/纯算术/改写指令不进检索，
+        # 直接走生成；retrieval 事件标注 skipped_retrieval=true（宁可多检索，不可漏检索，
+        # 所以只跳过整句明确命中的问题，判不准仍走下面的完整链路）。
+        metrics_store.bump("retrieval_skipped", settings=s)
+        yield {
+            "type": "retrieval",
+            "meta": {
+                "skipped_retrieval": True,
+                "final_count": 0,
+                "llm_configured": s.llm_configured,
+            },
+        }
+        yield from _stream_direct_answer(question, s)
+        return
+
     want_k = final_k or s.retrieve_final_top_k
     pool_k = max(want_k, s.rerank_candidates)
 
