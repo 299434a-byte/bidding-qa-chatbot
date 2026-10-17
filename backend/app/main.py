@@ -56,6 +56,8 @@ from .ingest import run_ingest
 
 from .pg import PG_TOOL_NAME, PgError, load_schema as load_pg_schema, render_schema_text as render_pg_schema_text
 
+from .probes import probe_health
+
 from .rag import answer_events, reused_answer_events
 
 from .rerank import rerank_hits
@@ -105,6 +107,18 @@ if _default_keys:
         "以下配置仍在用模板默认值（.env.example），请尽快更换：%s",
         ", ".join(_default_keys),
     )
+
+
+def _warm_store() -> None:
+    """后台预热向量库：嵌入式模式首次打开集合要 2 秒上下，不预热的话
+    进程刚起来的第一次探活/检索会踩冷启动超时。失败无所谓，探活会如实报。"""
+    try:
+        get_store(get_settings()).stats()
+    except Exception:  # noqa: BLE001 - 预热只是锦上添花，绝不让它影响启动
+        pass
+
+
+threading.Thread(target=_warm_store, daemon=True, name="store-warmup").start()
 
 
 class ChatRequest(BaseModel):
@@ -372,12 +386,15 @@ def _ingest_worker(mode: str, recreate: bool) -> None:
 @app.get("/api/health")
 def health() -> dict[str, Any]:
     s = get_settings()
+    # 真探活（5 秒 TTL 缓存）：逐组件极小请求确认服务真的活着，不只是配置填了。
+    # 任何一项挂了只是 degraded，接口恒 200——探活不能因依赖挂掉而自己先 500。
+    probe = probe_health(s)
     try:
         store_stats = get_store(s).stats()
     except VectorStoreError as exc:
         store_stats = {"error": str(exc)}
     return {
-        "status": "ok",
+        "status": probe["status"],
         "llm_configured": s.llm_configured,
         "llm_model": s.llm_model or None,
         "llm_model_display": s.llm_display_name or None,
@@ -403,6 +420,10 @@ def health() -> dict[str, Any]:
         "auth_enabled": s.auth_enabled,
         "modes": list(MODES),
         "index": store_stats,
+        # 真探活结果（纯新增）：pg/qdrant/neo4j/llm 逐组件 {ok, latency_ms, error, skipped}，
+        # vision/web_search 恒 skipped（付费外部 API，只报配置态不发请求）；前端状态卡画小圆点与延迟
+        "checks": probe["checks"],
+        "checked_at": probe["checked_at"],
         "ingesting": _ingest_state["running"],
         "kb_version": kb_version(s),
         # 新增布尔字段：是否仍有配置等于 .env.example 的模板默认值（启动 WARNING 同源判定）

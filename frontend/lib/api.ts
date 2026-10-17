@@ -45,6 +45,16 @@ export type KbStats = {
   error?: string;
 };
 
+export type HealthCheck = {
+  /** true=探活通过；false=失败/超时；null=未配置或不探活（skipped） */
+  ok: boolean | null;
+  latency_ms: number;
+  error: string | null;
+  skipped?: boolean;
+  /** 仅 vision/web_search：是否配了密钥（这两项是付费外部 API，恒不发请求探活） */
+  configured?: boolean;
+};
+
 export type Health = {
   status: string;
   llm_configured: boolean;
@@ -74,6 +84,10 @@ export type Health = {
   ingesting: boolean;
   /** 新增：仍有配置等于 .env.example 的模板默认值（启动 WARNING 同源判定） */
   template_default_risk?: boolean;
+  /** 新增：真探活结果（pg/qdrant/neo4j/llm 逐组件；vision/web_search 恒 skipped） */
+  checks?: Record<string, HealthCheck>;
+  /** 新增：探活时间戳（epoch 秒）；结果有 5 秒 TTL 缓存 */
+  checked_at?: number;
 };
 
 export type MetricsSummary = {

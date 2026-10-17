@@ -82,6 +82,17 @@ def _connect(s: Settings, readonly: bool = True):
         ) from exc
 
 
+def probe(s: Settings) -> None:
+    """探活：新建只读连接执行 SELECT 1，证明服务活着（不写库）。失败抛 PgError。"""
+    conn = _connect(s)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+            cur.fetchone()
+    finally:
+        conn.close()
+
+
 def _cell_text(value: Any) -> str:
     """把 PostgreSQL 返回的各种类型统一转成可读字符串（只依赖标准库）。"""
     if value is None:

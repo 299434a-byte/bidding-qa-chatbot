@@ -463,6 +463,10 @@ a {
   background: var(--success-500);
 }
 
+.dot-warn {
+  background: var(--warning-500);
+}
+
 .dot-err {
   background: var(--danger-500);
 }

@@ -164,3 +164,24 @@ def complete_chat(
             "推理模型会先把 max_tokens 用在思维链上，请调大 max_tokens。"
         )
     return content
+
+
+def probe(settings: Settings | None = None, timeout: int = 2) -> None:
+    """探活：max_tokens=1 的极小请求，证明网关 / 鉴权 / 模型真实可用。
+
+    不校验返回文本——推理模型会把 max_tokens 花在思维链上导致 content 为空，
+    那不算故障；只要拿到带 choices 的响应就算活着。失败抛 LLMError。
+    """
+    s = settings or get_settings()
+    client = _client(s, timeout=timeout)
+    try:
+        response = client.chat.completions.create(
+            model=s.llm_model,
+            messages=[{"role": "user", "content": "ping"}],
+            max_tokens=1,
+            stream=False,
+        )
+    except Exception as exc:
+        raise LLMError(f"LLM 探活失败：{exc}") from exc
+    if not getattr(response, "choices", None):
+        raise LLMError("LLM 探活未返回任何 choice")

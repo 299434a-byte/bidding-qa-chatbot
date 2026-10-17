@@ -4,7 +4,7 @@ import Icon, { type IconName } from "@/components/ui/icons";
 import type { Health, KbStats, MetricsSummary, SchemaResponse } from "@/lib/api";
 
 
-type Tone = "ok" | "err" | "off";
+type Tone = "ok" | "warn" | "err" | "off";
 
 type StatCard = {
   name: string;
@@ -46,6 +46,27 @@ export default function StatusCards({ health, kb, schema, metrics, metricsLocked
   const rerankSkipped = metrics?.rerank_skipped ?? 0;
   const rerankTried = rerankApplied + rerankFailed;
   const rerankRate = metrics?.rerank_success_rate ?? 0;
+
+  // 服务探活卡：绿=探活通过（附延迟），黄=失败/超时（附原因），灰=未配置或旧后端无探活数据
+  const probeCard = (name: string, key: string, icon: IconName, okDesc: string): StatCard => {
+    const check = health?.checks?.[key];
+    if (!check) {
+      return { name, icon, value: "—", desc: health ? "后端暂无探活数据" : "等待健康数据", tone: "off" };
+    }
+    if (check.skipped || check.ok === null) {
+      return { name, icon, value: "—", desc: "未配置，不探活", tone: "off" };
+    }
+    if (check.ok) {
+      return { name, icon, value: `${check.latency_ms} ms`, desc: okDesc, tone: "ok" };
+    }
+    return {
+      name,
+      icon,
+      value: `${check.latency_ms} ms`,
+      desc: (check.error || "探活失败").slice(0, 90),
+      tone: "warn",
+    };
+  };
 
   const groups: { title: string; icon: IconName; cards: StatCard[] }[] = [
     {
@@ -140,6 +161,16 @@ export default function StatusCards({ health, kb, schema, metrics, metricsLocked
         },
       ],
     },
+    {
+      title: "服务探活",
+      icon: "refresh",
+      cards: [
+        probeCard("PostgreSQL", "pg", "database", "SELECT 1 只读连通"),
+        probeCard("向量库", "qdrant", "database", "collection_exists + count 通过"),
+        probeCard("Neo4j", "neo4j", "network", "RETURN 1 只读会话通过"),
+        probeCard("大模型", "llm", "cpu", "max_tokens=1 极小请求通过"),
+      ],
+    },
   ];
 
   return (
@@ -169,8 +200,29 @@ export default function StatusCards({ health, kb, schema, metrics, metricsLocked
                     <Icon name={card.icon} size={14} />
                   </span>
                   <span className="stat-name">{card.name}</span>
-                  <span className="stat-dot-holder" title={card.tone === "ok" ? "正常" : card.tone === "err" ? "异常" : "未启用"}>
-                    <span className={`dot ${card.tone === "ok" ? "dot-ok" : card.tone === "err" ? "dot-err" : "dot-off"}`} />
+                  <span
+                    className="stat-dot-holder"
+                    title={
+                      card.tone === "ok"
+                        ? "正常"
+                        : card.tone === "warn"
+                          ? "探活失败"
+                          : card.tone === "err"
+                            ? "异常"
+                            : "未启用"
+                    }
+                  >
+                    <span
+                      className={`dot ${
+                        card.tone === "ok"
+                          ? "dot-ok"
+                          : card.tone === "warn"
+                            ? "dot-warn"
+                            : card.tone === "err"
+                              ? "dot-err"
+                              : "dot-off"
+                      }`}
+                    />
                   </span>
                 </div>
                 <div className="stat-value">{card.value}</div>
