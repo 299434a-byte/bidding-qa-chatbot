@@ -101,7 +101,7 @@ MySQL 业务库 / 招投标法规文件
 |---|---|---|
 | **FastAPI** | 后端 Web 框架 | 原生异步 + Pydantic 自动校验入参，写 SSE 流式接口最顺手，自带 OpenAPI 文档 |
 | **LangGraph** | Agent 编排 | 把 ReAct 循环显式建模成状态图，步数可控、可加递归上限，比手写 while 循环更稳 |
-| **Qdrant（嵌入式本地模式）** | 向量库 | 不需要 Docker / 独立服务，一个目录就是全部数据，交付给面试官「clone 即可跑」 |
+| **Qdrant（本地嵌入式 / 服务端双模式）** | 向量库 | 默认本地嵌入式：不需要 Docker / 独立服务，一个目录就是全部数据，「clone 即可跑」；填了 `QDRANT_URL` 就切服务端模式（容器/云端），解除单进程独占 |
 | **bge-small-zh-v1.5** | 中文向量模型 | 中文语义效果好、体积小（512 维），本地 CPU 可跑，无需 GPU |
 | **自建 BM25** | 关键词检索 | 公司名、项目编号这类「精确词」语义模型反而不准；自建实现零依赖、可持久化、完全可控 |
 | **RRF（排名融合）** | 两路结果合并 | 只依赖「排名」不依赖「分数」，免去向量分与 BM25 分不同量纲的归一化难题 |
@@ -364,7 +364,7 @@ cd backend
 
 1. **Qdrant 本地嵌入式模式为单进程独占**。`data/qdrant/` 同一时刻只允许一个进程打开，因此「重建知识库」只能用「后台线程 + 进程内锁」串行化实现。
 2. **PostgreSQL / Neo4j 工具只在配置齐备时才注册给 Agent**。`PG_USER`/`PG_PASSWORD` 或 `NEO4J_URI`/`NEO4J_USER`/`NEO4J_PASSWORD` 任一为空时，对应工具不注册，`/api/pg/schema`、`/api/graph/schema` 返回「未配置」而非报错——Agent 不会去调用一个必然失败的工具。
-3. **多进程部署当前不可用**。受第 1 条限制，不能用 `uvicorn --workers N` 或 Gunicorn 多 worker；Qdrant 嵌入式存储会被多进程争抢。生产化需要改用 Qdrant Server 模式。
+3. **多进程部署受"部署形态"约束**。本地嵌入式模式下不能用 `uvicorn --workers N` 或 Gunicorn 多 worker（`data/qdrant/` 会被多进程争抢）；把 `QDRANT_URL` 指向一个 Qdrant 服务（容器或云端）即可解除这一条。但即使切了服务端模式，**限流仍是进程内令牌桶、会话 `seq` 仍是 `MAX(seq)+1`**（见第 1、9 条），所以真要多进程还需换 Redis 共享状态与数据库序列。
 4. **数据源默认依赖远程局域网 MySQL**（`.env` 中的 `MYSQL_HOST`，需改成你可达的库地址）。外部环境无法访问该库，可自备数据、用 `copy_mysql.py` 留底，或把 `KB_SOURCE` 改为 `postgres` 直接读本机 PG 副本。
 5. **首次运行需要下载向量模型**（`BAAI/bge-small-zh-v1.5`）。国内网络建议在 `.env` 里走镜像：`HF_ENDPOINT=https://hf-mirror.com`、`HF_HUB_DISABLE_XET=1`。
 6. **重排 / Agent / 图片解析 / 联网搜索都依赖外部 API Key**。未配置时不会报错，而是**自动降级**：无 `LLM_API_KEY` 时退化为「仅检索」模式，无 `ZHIPUAI_API_KEY` 时 `/analyze-image` 返回 502，无 `TAVILY_API_KEY` 时联网搜索工具不注册。

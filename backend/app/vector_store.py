@@ -55,17 +55,53 @@ def point_id_of(doc_id: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"bidding-qa::{doc_id}"))
 
 
+def mask_url(url: str) -> str:
+    """把 URL 里的 api_key / token 之类的查询参数打码，便于写日志。"""
+    text = (url or "").strip()
+    if not text:
+        return ""
+    if "?" not in text:
+        return text
+    head, _, query = text.partition("?")
+    safe = []
+    for pair in query.split("&"):
+        key = pair.split("=", 1)[0]
+        if key.lower() in {"api_key", "apikey", "token", "key", "password"}:
+            safe.append(f"{key}=***")
+        else:
+            safe.append(pair)
+    return head + "?" + "&".join(safe)
+
+
 class VectorStore:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        settings.qdrant_path.mkdir(parents=True, exist_ok=True)
-        try:
-            self.client = QdrantClient(path=str(settings.qdrant_path))
-        except Exception as exc:
-            raise VectorStoreError(
-                f"打开本地向量库失败（{settings.qdrant_path}）：{exc}。"
-                "本地模式同一目录只能被一个进程占用，请确认没有其他后端/建库脚本在运行。"
-            ) from exc
+        # 【双模式】QDRANT_URL 非空走服务端（容器/云端），否则用本地嵌入式目录。
+        # 服务端模式不碰 qdrant_path，避免在多进程部署时误建本地目录。
+        self.mode = "server" if (settings.qdrant_url or "").strip() else "local"
+        if self.mode == "server":
+            url = settings.qdrant_url.strip()
+            try:
+                self.client = QdrantClient(
+                    url=url,
+                    api_key=(settings.qdrant_api_key or "").strip() or None,
+                    timeout=settings.qdrant_timeout,
+                    prefer_grpc=settings.qdrant_prefer_grpc,
+                )
+            except Exception as exc:
+                raise VectorStoreError(
+                    f"连接向量库服务端失败（{mask_url(url)}）：{exc}。"
+                    "请确认 QDRANT_URL 可达、端口正确；若使用云端还需配 QDRANT_API_KEY。"
+                ) from exc
+        else:
+            settings.qdrant_path.mkdir(parents=True, exist_ok=True)
+            try:
+                self.client = QdrantClient(path=str(settings.qdrant_path))
+            except Exception as exc:
+                raise VectorStoreError(
+                    f"打开本地向量库失败（{settings.qdrant_path}）：{exc}。"
+                    "本地模式同一目录只能被一个进程占用，请确认没有其他后端/建库脚本在运行。"
+                ) from exc
         self._lock = threading.Lock()
         atexit.register(_close_quietly, self.client)
 

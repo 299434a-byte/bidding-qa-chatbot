@@ -114,6 +114,10 @@ class Settings:
 
     qdrant_path: Path
     qdrant_collection: str
+    qdrant_url: str
+    qdrant_api_key: str
+    qdrant_timeout: int
+    qdrant_prefer_grpc: bool
 
     embed_model: str
     embed_dim: int
@@ -329,6 +333,11 @@ def _build_settings() -> Settings:
         kb_primary_keys=_parse_primary_keys(_str("KB_PRIMARY_KEYS")),
         qdrant_path=_path("QDRANT_PATH", "./data/qdrant"),
         qdrant_collection=_str("QDRANT_COLLECTION", "bidding_kb"),
+        # 【双模式】QDRANT_URL 为空＝本地嵌入式（默认）；非空＝服务端模式（容器/云端）。
+        qdrant_url=_str("QDRANT_URL"),
+        qdrant_api_key=_str("QDRANT_API_KEY"),
+        qdrant_timeout=_int("QDRANT_TIMEOUT", 30),
+        qdrant_prefer_grpc=_bool("QDRANT_PREFER_GRPC", False),
         embed_model=_str("EMBED_MODEL", "BAAI/bge-small-zh-v1.5"),
         embed_dim=_int("EMBED_DIM", 512),
         embed_batch_size=_int("EMBED_BATCH_SIZE", 32),
