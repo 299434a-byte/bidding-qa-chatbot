@@ -23,11 +23,15 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 
 from langchain_core.runnables import RunnableConfig
 
+from langchain_core.runnables.config import get_config_list
+
 from langchain_core.tools import tool
 
-from langgraph.errors import GraphRecursionError
+from langgraph.errors import GraphBubbleUp, GraphRecursionError
 
-from langgraph.prebuilt import create_react_agent
+from langgraph.prebuilt import ToolNode, ToolRuntime, create_react_agent
+
+from langgraph.runtime import Runtime
 
 from langchain_openai import ChatOpenAI
 
@@ -228,6 +232,72 @@ def _collect_tools(s: Settings, use_web: bool) -> list[Any]:
     return tools
 
 
+class _ParallelToolNode(ToolNode):
+    """并行工具节点：一轮里的多个 tool_calls 用 asyncio.gather 并发执行。
+
+    相对 langgraph 内置 ToolNode 的三点差异：
+      ① 并发上限：每轮新建一个信号量（AGENT_TOOL_CONCURRENCY，默认 3），
+         既防打爆下游，又避免缓存的图跨事件循环复用同一个信号量；
+      ② 结果顺序：asyncio.gather 按「提交顺序」返回，天然与 tool_calls
+         原始顺序一致（tool_call_id 对齐），与完成先后无关；
+      ③ 错误隔离：单个工具执行异常转成 status=error 的 ToolMessage，
+         只影响自己，其余工具照常返回（内置 handle_tool_errors 只兜
+         调用期错误，执行期异常仍会抛出，这里补上外层隔离）。
+    """
+
+    def __init__(self, tools: list[Any], *, concurrency: int = 3, **kwargs: Any) -> None:
+        super().__init__(tools, **kwargs)
+        self._concurrency = max(1, int(concurrency))
+
+    async def _arun_one_guarded(
+        self,
+        call: dict[str, Any],
+        input_type: str,
+        tool_runtime: Any,
+        semaphore: asyncio.Semaphore,
+    ) -> Any:
+        """带信号量与异常隔离的单工具执行。"""
+        async with semaphore:
+            try:
+                return await self._arun_one(call, input_type, tool_runtime)  # type: ignore[arg-type]
+            except GraphBubbleUp:
+                raise  # 图中断是控制流，必须原样抛给 LangGraph
+            except Exception as exc:  # noqa: BLE001 - 单工具失败绝不拖垮整轮
+                name = str(call.get("name") or "")
+                return ToolMessage(
+                    content=f"工具「{name}」执行失败：{exc}",
+                    name=name,
+                    tool_call_id=str(call.get("id") or ""),
+                    status="error",
+                )
+
+    async def _afunc(self, input: Any, config: Any, runtime: Any = None) -> Any:
+        """复刻父类 ``_afunc`` 的执行管线，换上带限流与隔离的单工具执行。"""
+        runtime = runtime or Runtime()
+        tool_calls, input_type = self._parse_input(input)
+        config_list = get_config_list(config, len(tool_calls))
+        # 每轮新建信号量：并发上限只约束「这一轮」，且不跨事件循环复用。
+        semaphore = asyncio.Semaphore(self._concurrency)
+        coros = []
+        for call, cfg in zip(tool_calls, config_list, strict=False):
+            state = self._extract_state(input, cfg)
+            tool_runtime = ToolRuntime(
+                state=state,
+                context=runtime.context,
+                config=cfg,
+                stream_writer=runtime.stream_writer,
+                tool_call_id=call["id"],
+                store=runtime.store,
+                tools=list(self.tools_by_name.values()),
+                execution_info=runtime.execution_info,
+                server_info=runtime.server_info,
+            )
+            coros.append(self._arun_one_guarded(call, input_type, tool_runtime, semaphore))
+        # gather 按提交顺序返回结果 → 与 tool_calls 原始顺序对齐（测试锁住）。
+        outputs = await asyncio.gather(*coros)
+        return self._combine_tool_outputs(outputs, input_type)
+
+
 def _build_agent(s: Settings, web_search_enabled: bool = False) -> Any:
     """构造（并缓存）ReAct Agent。"""
     use_web = bool(web_search_enabled and s.web_search_configured)
@@ -240,6 +310,7 @@ def _build_agent(s: Settings, web_search_enabled: bool = False) -> Any:
         s.llm_timeout,
         s.pg_configured,
         s.graph_configured,
+        s.agent_tool_concurrency,
         use_web,
     )
     agent = _agent_cache.get(key)
@@ -251,7 +322,9 @@ def _build_agent(s: Settings, web_search_enabled: bool = False) -> Any:
 
     agent = create_react_agent(
         model,
-        tools=tools,
+        # 工具节点换成自定义并行版：一轮多个 tool_calls 并发执行（有并发上限），
+        # 结果按 tool_calls 原始顺序回填，单工具异常只影响自己。
+        tools=_ParallelToolNode(tools, concurrency=s.agent_tool_concurrency),
         prompt=_agent_system_prompt(s, web_search_enabled=use_web),
     )
     _agent_cache[key] = agent
@@ -357,6 +430,9 @@ def _new_turn_state() -> dict[str, Any]:
         "sources_emitted": False,
         "answer_parts": [],
         "transcript": [],
+        # 本轮观察到的单轮最大并行工具数（一条 AIMessage 带 N 个 tool_calls 记 N），
+        # 随 done 事件透出，供 metrics 记账。
+        "max_parallel_tools": 0,
     }
 
 
@@ -539,6 +615,10 @@ async def _stream_react_turn(
                     "query": str(args.get("query") or question),
                     "arguments": args,
                 }
+            # 一条 AIMessage 带 N 个 tool_calls = 这一轮并行了 N 个工具。
+            turn["max_parallel_tools"] = max(
+                int(turn.get("max_parallel_tools") or 0), len(msg.tool_calls)
+            )
 
 
 def _prune_transcript(messages: list[Any]) -> list[Any]:
@@ -710,4 +790,9 @@ async def agent_events(
     for event in citation_events:
         yield event
 
-    yield {"type": "done", "mode": "agent_rag" if turn["tool_called"] else "agent_direct"}
+    yield {
+        "type": "done",
+        "mode": "agent_rag" if turn["tool_called"] else "agent_direct",
+        # 单轮最大并行工具数（纯新增字段；1 = 本轮没出现并行批次）。
+        "parallel_tools": int(turn.get("max_parallel_tools") or 0),
+    }

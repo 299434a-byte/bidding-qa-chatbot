@@ -193,6 +193,7 @@ class _EventCollector:
         self.done_mode: str | None = None
         self.error: str | None = None
         self.confidence: float | None = None
+        self.parallel_tools: int = 0
 
     def feed(self, event: dict[str, Any]) -> None:
         etype = event.get("type")
@@ -259,6 +260,9 @@ class _EventCollector:
                 self.confidence = float(event["confidence"])
         elif etype == "done":
             self.done_mode = event.get("mode")
+            # Agent 通路的 done 带本轮单轮最大并行工具数（纯新增字段，老后端没有）
+            if event.get("parallel_tools") is not None:
+                self.parallel_tools = int(event["parallel_tools"])
 
     def answer_text(self) -> str:
         return "".join(self.answer).strip()
@@ -879,10 +883,12 @@ def _finalize_qa(
     rerank_failed: bool = False,
     rerank_skipped: bool = False,
     confidence: float | None = None,
+    parallel_tools: int = 0,
 ) -> None:
     """问答收尾的统一动作：记一条指标 + 打一行日志（两个问答入口共用）。
 
     ``confidence`` 来自本轮 citation_check 事件的逐句可信度（没有则为 None，不入库均值）。
+    ``parallel_tools`` 来自 Agent 通路 done 事件里的单轮最大并行工具数（纯 RAG 通路恒 0）。
     """
     elapsed_ms = (time.perf_counter() - started) * 1000
     metrics_store.record(
@@ -895,6 +901,7 @@ def _finalize_qa(
         rerank_failed=rerank_failed,
         rerank_skipped=rerank_skipped,
         confidence=confidence,
+        parallel_tools=parallel_tools,
         settings=settings,
     )
     logger.info(
@@ -1258,6 +1265,7 @@ async def agent_chat(
             rerank_failed=collector.rerank_failed,
             rerank_skipped=collector.rerank_skipped,
             confidence=collector.confidence,
+            parallel_tools=collector.parallel_tools,
         )
 
         yield "data: [DONE]\n\n"

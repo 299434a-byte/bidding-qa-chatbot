@@ -121,6 +121,11 @@ def _ensure_schema(conn: sqlite3.Connection, path: Path) -> None:
             conn.execute("ALTER TABLE qa_metrics ADD COLUMN confidence REAL")
         except Exception:
             pass
+        try:
+            # 本轮单轮最大并行工具数（Agent 通路；0 = 非 Agent / 没有工具调用轮）。
+            conn.execute("ALTER TABLE qa_metrics ADD COLUMN parallel_tools INTEGER NOT NULL DEFAULT 0")
+        except Exception:
+            pass
         conn.commit()
         _schema_ready.add(key)
 
@@ -141,12 +146,14 @@ def record(
     rerank_failed: bool = False,
     rerank_skipped: bool = False,
     confidence: float | None = None,
+    parallel_tools: int = 0,
     settings: Settings | None = None,
 ) -> bool:
     """记一条问答指标。成功返回 ``True``；任何失败静默返回 ``False``。
 
     ``confidence`` 是本轮 citation_check 事件里的逐句可信度（0~1）；
     传 ``None`` 表示本轮没有可信度结论（如缓存命中 / 直答通道），不参与均值。
+    ``parallel_tools`` 是 Agent 本轮观察到的单轮最大并行工具数（1 = 没并行）。
     """
     s = settings or get_settings()
     try:
@@ -155,8 +162,8 @@ def record(
             conn.execute(
                 "INSERT INTO qa_metrics "
                 "(mode, elapsed_ms, first_token_ms, sources_count, cache_hit, "
-                "rerank_applied, rerank_failed, rerank_skipped, confidence, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "rerank_applied, rerank_failed, rerank_skipped, confidence, parallel_tools, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     mode or "llm",
                     max(0.0, float(elapsed_ms or 0.0)),
@@ -167,6 +174,7 @@ def record(
                     1 if rerank_failed else 0,
                     1 if rerank_skipped else 0,
                     None if confidence is None else round(float(confidence), 6),
+                    max(0, int(parallel_tools or 0)),
                     _now_iso(),
                 ),
             )
@@ -255,6 +263,8 @@ def summary(settings: Settings | None = None) -> dict[str, Any]:
         "rerank_success_rate": 0.0,
         "avg_confidence": 0.0,
         "low_confidence_count": 0,
+        "max_parallel_tools": 0,
+        "parallel_tool_rounds": 0,
         "forced_finalize": 0,
         "coverage_refused": 0,
         "coverage_pass": 0,
@@ -276,7 +286,9 @@ def summary(settings: Settings | None = None) -> dict[str, Any]:
                 "COALESCE(SUM(rerank_failed), 0) AS rerank_fails, "
                 "COALESCE(SUM(rerank_skipped), 0) AS rerank_skips, "
                 "COALESCE(AVG(CASE WHEN confidence IS NOT NULL THEN confidence END), 0) AS avg_conf, "
-                "COALESCE(SUM(CASE WHEN confidence IS NOT NULL AND confidence < 0.5 THEN 1 ELSE 0 END), 0) AS low_conf "
+                "COALESCE(SUM(CASE WHEN confidence IS NOT NULL AND confidence < 0.5 THEN 1 ELSE 0 END), 0) AS low_conf, "
+                "COALESCE(MAX(parallel_tools), 0) AS max_par, "
+                "COALESCE(SUM(CASE WHEN parallel_tools > 1 THEN 1 ELSE 0 END), 0) AS par_rounds "
                 "FROM qa_metrics"
             ).fetchone()
             mode_rows = conn.execute(
@@ -339,6 +351,9 @@ def summary(settings: Settings | None = None) -> dict[str, Any]:
             # 平均逐句可信度（只统计有 citation_check 结论的问答）+ 低可信（<0.5）次数
             "avg_confidence": round(float(row["avg_conf"] or 0.0), 4),
             "low_confidence_count": int(row["low_conf"] or 0),
+            # 并行工具：单轮最大批大小 + 出现过并行批次（>1）的问答数
+            "max_parallel_tools": int(row["max_par"] or 0),
+            "parallel_tool_rounds": int(row["par_rounds"] or 0),
             "forced_finalize": counters.get("forced_finalize", 0),
             "coverage_refused": counters.get("coverage_refused", 0),
             "coverage_pass": counters.get("coverage_pass", 0),

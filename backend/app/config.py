@@ -155,6 +155,8 @@ class Settings:
     agent_max_tokens: int
     agent_history_turns: int
     agent_max_steps: int
+    # 一轮里多个 tool_calls 的最大并行数（asyncio.gather + 信号量；1 = 串行）
+    agent_tool_concurrency: int
 
     pg_host: str
     pg_port: int
@@ -361,6 +363,8 @@ def _build_settings() -> Settings:
         agent_max_tokens=_int("AGENT_MAX_TOKENS", 2048),
         agent_history_turns=_int("AGENT_HISTORY_TURNS", 6),
         agent_max_steps=_int("AGENT_MAX_STEPS", 6),
+        # 最小 1：0/负数没有意义（至少串行跑一遍）
+        agent_tool_concurrency=max(1, _int("AGENT_TOOL_CONCURRENCY", 3)),
         pg_host=_str("PG_HOST", "127.0.0.1"),
         pg_port=_int("PG_PORT", 5432),
         pg_user=_str("PG_USER"),
